@@ -36,13 +36,13 @@ This repository contains a Python script `prepare.py` in `data` folder that help
 2. To run the script, use the following command:
 
     ```bash
-    python prepare.py --data_dir <data_directory>
+    python prepare.py --folder <data_directory>
     ```
 
     Replace `<data_directory>` with the path to your chat data. For example, if your data is in a directory called `my_data/`, you would run:
 
     ```bash
-    python prepare.py --data_dir my_data/
+    python prepare.py --folder my_data/
     ```
 
 3. The script will create a binary file `train.bin` in the current directory. This file contains the Byte-Pair Encoded tokens of your chat data.
