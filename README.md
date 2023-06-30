@@ -6,7 +6,7 @@ Whatsapp chatbot API using generative pretraining transformers
 You can clone this repository on your local machines using:
 
 ```bash
-> git clone https://github.com/SilvioBaratto/stockpy
+> git clone https://github.com/SilvioBaratto/WhatsGPT
 ```
 
 To install the package:
