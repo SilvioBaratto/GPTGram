@@ -16,8 +16,6 @@ To install the package:
 > ./install.sh
 ```
 
-Sure, here's an example of how a README file could look:
-
 ---
 
 # Prepare Chat Data for Training
