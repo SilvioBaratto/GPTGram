@@ -4,11 +4,11 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name='WhatsGPT',
+    name='GPTGram',
     version='0.1.0',
     author=['Silvio Baratto', 'Valeria Insogna'],
     author_email=['SILVIOANGELO.BARATTOROLDAN@studenti.units.it', 'VALERIA.INSOGNA@studenti.units.it'],
-    description='Whatsapp chatbot API using generative pretraining transformers',
+    description='Telegram chatbot API using generative pretraining transformers',
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/SilvioBaratto/WhatsGPT",

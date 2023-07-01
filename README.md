@@ -1,5 +1,5 @@
-# WhatsGPT
-Whatsapp chatbot API using generative pretraining transformers
+# GPTGram
+Telegram chatbot API using generative pretraining transformers
 
 ### Installing from source
 

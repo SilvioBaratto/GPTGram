@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from transformers import GPT2LMHeadModel
+from ._transformer import LayerNorm, CausalSelfAttention, Block, MLP
 from ..config import Config as cfg
 
 class GPT(nn.Module):
@@ -189,7 +190,7 @@ class GPT(nn.Module):
 
         return logits, loss
 
-    def crop_block_size(self, block_size):
+    def crop_block_size(self):
         """
         Crops the model's block size to a smaller value if necessary.
 
@@ -211,20 +212,17 @@ class GPT(nn.Module):
             >>> gpt_model.crop_block_size(512)  # reduce the block size to 512
 
         """
-        assert block_size <= self.cfg.gpt.block_size, "New block size must be smaller than or equal to the current block size"
-
-        # Update the block size in the model's configuration
-        self.cfg.gpt.block_size = block_size
+        assert cfg.gpt.block_size <= cfg.gpt.block_size, "New block size must be smaller than or equal to the current block size"
 
         # Crop the weights for the position embeddings to the new block size
-        self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
+        self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:cfg.gpt.block_size])
 
         # Iterate over each transformer block in the model
         for block in self.transformer.h:
             # Check if the transformer block has attention bias
             if hasattr(block.attn, 'bias'):
                 # If it does, crop the attention bias to the new block size
-                block.attn.bias = block.attn.bias[:,:,:block_size,:block_size]
+                block.attn.bias = block.attn.bias[:,:,:cfg.gpt.block_size,:cfg.gpt.block_size]
 
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
@@ -261,7 +259,7 @@ class GPT(nn.Module):
         assert all(k == 'dropout' for k in override_args), "Only 'dropout' can be overridden"
         
         # Determine n_layer, n_head and n_embd from model_type
-        cfg.gpt_args = {
+        config_args = {
             'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
             'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
             'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
@@ -269,13 +267,13 @@ class GPT(nn.Module):
         }[model_type]
 
         # Force vocab_size=50257, block_size=1024, and bias=True
-        cfg.gpt_args['vocab_size'] = 50257  # always 50257 for GPT model checkpoints
-        cfg.gpt_args['block_size'] = 1024  # always 1024 for GPT model checkpoints
-        cfg.gpt_args['bias'] = True  # always True for GPT model checkpoints
+        config_args['vocab_size'] = 50257  # always 50257 for GPT model checkpoints
+        config_args['block_size'] = 1024  # always 1024 for GPT model checkpoints
+        config_args['bias'] = True  # always True for GPT model checkpoints
 
         # Override the dropout rate, if desired
         if 'dropout' in override_args:
-            cfg.gpt_args['dropout'] = override_args['dropout']
+            config_args['dropout'] = override_args['dropout']
 
         # Initialize a GPT model
         model = GPT()
@@ -315,7 +313,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def init_optimizer(self):
         """
         Configures the optimizer for the GPT model.
 

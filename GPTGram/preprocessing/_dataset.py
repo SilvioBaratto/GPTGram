@@ -3,7 +3,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from ..config import Config as cfg
 
-class WhatsDataset(Dataset):
+class GramDataset(Dataset):
     """
     A custom dataset class for loading data from a binary file.
 
