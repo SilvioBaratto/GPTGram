@@ -3,8 +3,7 @@ import inspect
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from transformers import GPT2LMHeadModel
-from ._transformer import LayerNorm, CausalSelfAttention, Block, MLP
+from ._transformer import LayerNorm, Block
 from ..config import Config as cfg
 
 class GPT(nn.Module):
@@ -168,7 +167,8 @@ class GPT(nn.Module):
         """
         device = idx.device
         b, t = idx.size()
-        assert t <= self.cfg.gpt.block_size, f"Cannot forward sequence of length {t}, block size is only {self.cfg.gpt.block_size}"
+        assert t <= cfg.gpt.block_size, \
+        f"Cannot forward sequence of length {t}, block size is only {cfg.gpt.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
@@ -266,6 +266,7 @@ class GPT(nn.Module):
             'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
         }[model_type]
 
+
         # Force vocab_size=50257, block_size=1024, and bias=True
         config_args['vocab_size'] = 50257  # always 50257 for GPT model checkpoints
         config_args['block_size'] = 1024  # always 1024 for GPT model checkpoints
@@ -285,6 +286,7 @@ class GPT(nn.Module):
         # Ignore the '.attn.bias' parameter in the state_dict of the new model
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')]
 
+        from transformers import GPT2LMHeadModel
         # Initialize a pretrained GPT model from Hugging Face's Transformers library
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
 
@@ -345,7 +347,7 @@ class GPT(nn.Module):
 
         # Define optimizer groups with different weight decay settings
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': decay_params, 'weight_decay': cfg.optimizer.weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
 
@@ -357,13 +359,16 @@ class GPT(nn.Module):
 
         # Check if fused AdamW is available and if the device type is CUDA
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
+        use_fused = fused_available and cfg.system.device == 'cuda'
 
         # Define extra arguments for the optimizer
         extra_args = dict(fused=True) if use_fused else dict()
 
         # Create AdamW optimizer with the given settings
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        optimizer = torch.optim.AdamW(optim_groups, 
+                                      lr=cfg.optimizer.learning_rate, 
+                                      betas=cfg.optimizer.betas, 
+                                      **extra_args)
 
         print(f"using fused AdamW: {use_fused}")
 
@@ -391,11 +396,8 @@ class GPT(nn.Module):
         # Number of parameters in the model
         N = self.get_num_params()
 
-        # Model's configuration
-        cfg = self.cfg.gpt
-
         # Unpack key parameters from the configuration
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
+        L, H, Q, T = cfg.gpt.n_layer, cfg.gpt.n_head, cfg.gpt.n_embd // cfg.gpt.n_head, cfg.gpt.block_size
 
         # Estimate the number of floating point operations (flops) per token and per iteration
         flops_per_token = 6 * N + 12 * L * H * Q * T
@@ -441,7 +443,7 @@ class GPT(nn.Module):
         """
         for _ in range(max_new_tokens):
             # If the sequence context is growing too long, crop it to block size
-            idx_cond = idx if idx.size(1) <= self.cfg.gpt.block_size else idx[:, -self.cfg.gpt.block_size:]
+            idx_cond = idx if idx.size(1) <= cfg.gpt.block_size else idx[:, -cfg.gpt.block_size:]
             # Forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             # Scale the logits at the final step by the desired temperature

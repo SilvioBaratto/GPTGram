@@ -36,8 +36,6 @@ args = parser.parse_args()
 base_dir = args.folder
 # Get a list of all .txt files in the base directory
 chat_files = glob.glob(os.path.join(base_dir, "*/*_chat.txt"))
-# Output file path
-output_file = os.path.join('train.bin')
 
 # List of phrases that if found in a line, that line will be omitted
 omitted_phrases = ["image omitted",
@@ -53,7 +51,6 @@ timestamp_regex = r"\[\d{2}/\d{2}/\d{2}, \d{2}:\d{2}:\d{2}\] "
 
 # A list to store all tokens from all files
 data_tokens = []
-
 # Loop over all chat files
 for chat_file in chat_files:
     # Open the current chat file
@@ -73,11 +70,25 @@ for chat_file in chat_files:
 # Concatenate all tokens into a single numpy array
 data_tokens = np.concatenate(data_tokens)
 
-# Write the tokens to the binary output file
-data_tokens.astype(np.uint16).tofile(output_file)
+# Determine the split index for training and validation
+n = len(data_tokens)
+train_idx = int(n * 0.9)  # 90% of the data for training
+
+# Split the data into training and validation
+train_tokens = data_tokens[:train_idx]
+val_tokens = data_tokens[train_idx:]
+
+# Output file paths
+train_output_file = os.path.join('train.bin')
+val_output_file = os.path.join('val.bin')
+
+# Write the tokens to the binary output files
+train_tokens.astype(np.uint16).tofile(train_output_file)
+val_tokens.astype(np.uint16).tofile(val_output_file)
 
 # Print the total number of tokens
-print(f"data has {len(data_tokens):,} tokens")
+print(f"train has {len(train_tokens):,} tokens")
+print(f"val has {len(val_tokens):,} tokens")
 
 
 

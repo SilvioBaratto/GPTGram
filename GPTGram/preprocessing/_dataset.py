@@ -20,7 +20,7 @@ class GramDataset(Dataset):
 
     """
 
-    def __init__(self, filepath):
+    def __init__(self, file):
         """
         Initializes the dataset by loading the data from a file.
 
@@ -28,7 +28,7 @@ class GramDataset(Dataset):
             filepath (str): The file path of the binary data file.
         """
         # Load the data using memory mapping for efficient access
-        self.data = np.memmap(filepath, dtype=np.uint16, mode='r')
+        self.data = np.memmap(file, dtype=np.uint16, mode='r')
 
     def __len__(self):
         """
