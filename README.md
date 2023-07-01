@@ -6,13 +6,13 @@ Telegram chatbot API using generative pretraining transformers
 You can clone this repository on your local machines using:
 
 ```bash
-> git clone https://github.com/SilvioBaratto/WhatsGPT
+> git clone https://github.com/SilvioBaratto/GPTGram
 ```
 
 To install the package:
 
 ```bash
-> cd stockpy
+> cd GPTGram
 > ./install.sh
 ```
 
