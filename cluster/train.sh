@@ -1,15 +1,13 @@
 #!/bin/bash
 
-#SBATCH --job-name="script"
-#SBATCH --output=log.out
-#SBATCH --partition=EPYC
-#SBATCH	--nodes=1
+#SBATCH --job-name=GPTGram_job
+#SBATCH --output=GPTGram_job.out
+#SBATCH --partition=DGX
 #SBATCH --exclusive
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
 #SBATCH --time=02:00:00
-#SBATCH --nodelist=epyc[005]
 
-module load conda/23.3.1
 srun python ../cmd/train.py
 
