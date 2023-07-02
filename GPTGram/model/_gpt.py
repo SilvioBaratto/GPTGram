@@ -1,5 +1,4 @@
 import math
-import inspect
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -314,65 +313,6 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
-
-    def init_optimizer(self):
-        """
-        Configures the optimizer for the GPT model.
-
-        This method first collects all the model parameters that require gradients.
-        It then groups these parameters into two groups based on their dimensionality.
-        Any parameters that are 2D will have weight decay applied to them; all others will not.
-        The method then creates an AdamW optimizer with the given learning rate, betas, and weight decay settings.
-        The method uses the fused version of AdamW if it is available and if the device type is CUDA.
-
-        Args:
-            weight_decay (float): The weight decay (L2 penalty) to apply to the parameters.
-            learning_rate (float): The learning rate for the optimizer.
-            betas (tuple): The coefficients used for computing running averages of gradient and its square.
-            device_type (str): The type of device to run the model on. Can be 'cpu' or 'cuda'.
-
-        Returns:
-            torch.optim.AdamW: The configured AdamW optimizer.
-
-        Examples:
-            >>> gpt = GPT()
-            >>> optimizer = gpt.configure_optimizers(0.01, 0.001, (0.9, 0.999), 'cuda')
-        """
-        # Get all parameters of the model that require gradients
-        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-
-        # Group the parameters based on their dimensionality
-        decay_params = [p for p in param_dict.values() if p.dim() >= 2]  # 2D parameters will have weight decay
-        nodecay_params = [p for p in param_dict.values() if p.dim() < 2]  # non-2D parameters will not have weight decay
-
-        # Define optimizer groups with different weight decay settings
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': cfg.optimizer.weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-
-        # Print the number of decayed and non-decayed parameters
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-
-        # Check if fused AdamW is available and if the device type is CUDA
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and cfg.system.device == 'cuda'
-
-        # Define extra arguments for the optimizer
-        extra_args = dict(fused=True) if use_fused else dict()
-
-        # Create AdamW optimizer with the given settings
-        optimizer = torch.optim.AdamW(optim_groups, 
-                                      lr=cfg.optimizer.learning_rate, 
-                                      betas=cfg.optimizer.betas, 
-                                      **extra_args)
-
-        print(f"using fused AdamW: {use_fused}")
-
-        return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """

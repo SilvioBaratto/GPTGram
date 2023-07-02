@@ -14,7 +14,7 @@ from ..config import Config as cfg
 from ..preprocessing import GramDataset
 from ..model import GPT
 
-class Trainer:
+class GramTrainer:
 
     def __init__(self, filepath):
         train_file = os.path.join(filepath, 'train.bin')
@@ -253,7 +253,7 @@ class Trainer:
 
         return model
 
-    def save_model(self):
+    def _save_model(self, best_val_loss: float = None):
         """
         Save the current state of the model to a checkpoint file.
 
@@ -279,11 +279,21 @@ class Trainer:
         # Create the necessary directory structure for the file path
         os.makedirs(os.path.dirname(file_path), mode=0o755, exist_ok=True)
 
-        # Get the current state of the model
-        state = self._log_model_state()
+        # The following section is your provided code incorporated into this function:
+        raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
 
-        # Save the model state to the file path
-        torch.save(state, file_path)
+        checkpoint = {
+            'model': raw_model.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'model_args': self.model_args,
+            'iter_num': self.iter_num,
+            'best_val_loss': best_val_loss,
+            'config': self.config,
+        }
+
+        print(f"saving checkpoint to {lib_dir}")
+        torch.save(checkpoint, file_path)
+
 
     def _load_model(self, model, optimizer=None) -> None:
         """
@@ -323,12 +333,12 @@ class Trainer:
 
         # Load the state from the file path
         checkpoint = torch.load(file_path, map_location=cfg.system.device)
-        checkpoint_model_args = checkpoint['model_args']
-
-        # Force these config attributes to be equal otherwise we can't even resume training
-        # the rest of the attributes (e.g. dropout) can stay as desired from command line
-        for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-            cfg.gpt[k] = checkpoint_model_args[k]
+        
+        # Update the 'model_args', 'iter_num', 'best_val_loss', and 'config' attributes
+        self.model_args = checkpoint['model_args']
+        self.iter_num = checkpoint['iter_num']
+        self.best_val_loss = checkpoint['best_val_loss']
+        self.config = checkpoint['config']
 
         # Load the model state from the checkpoint
         state_dict = checkpoint['model']
@@ -344,18 +354,120 @@ class Trainer:
 
         # Load optimizer state if optimizer is provided
         if optimizer is not None:
-            optimizer_state = checkpoint.get('optimizer_state')
-            if optimizer_state is not None:
-                optimizer.load_state_dict(optimizer_state)
+            optimizer.load_state_dict(checkpoint['optimizer'])
 
-    @torch.no_grad()
-    def batch_loss(self, batch):
-        self.model.eval()
-        x_batch, y_batch = batch
-        with self.ctx:
-            logits, loss = self.model(x_batch, y_batch)
+
+    def _train(self, train_dl: torch.utils.data.DataLoader) -> float:
+        """
+        Trains the model on the training data for the specified number of epochs.
+
+        This method will train the model for a specified number of epochs.
+        During each epoch, it will iterate over the training DataLoader, performing a forward and backward pass
+        for each batch of data. Gradient accumulation is used if specified in the configuration, and the 
+        gradients are clipped if a threshold is set in the configuration. After each epoch, the average 
+        training loss is computed and returned.
+
+        Args:
+            train_dl (torch.utils.data.DataLoader): The training data loader.
+
+        Returns:
+            avg_train_loss (float): The average training loss for the epoch.
+
+        """
+
+        # Initialize the variable for tracking the total loss
+        total_loss = 0.0
+        # Set the model to training mode. This enables operations which are only applied during training like dropout
         self.model.train()
-        return loss.item()
+
+        # Iterate over all batches in the training data loader
+        for x_batch, y_batch in self.train_dataloader:
+            # Move batch tensors to the same device as the model
+            x_batch = x_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
+
+            # Iterate over each accumulation step
+            for micro_step in range(cfg.data.gradient_accumulation_steps):
+                if self.ddp:
+                    # in DDP training we only need to sync gradients at the last micro step.
+                    # this attribute is used to ensure that gradients are only synchronized 
+                    # (summed across all devices) at the end of all gradient accumulation steps, 
+                    # which can save on communication costs.
+                    self.model.require_backward_grad_sync = (micro_step == cfg.data.gradient_accumulation_steps - 1)
+
+                # Perform a forward pass through the model, getting the logits and loss
+                # Note: the context manager is used to enable mixed precision training
+                with self.ctx:
+                    logits, loss = self.model(x_batch, y_batch)
+                    # Scale the loss by the number of gradient accumulation steps
+                    scaled_loss = loss / cfg.data.gradient_accumulation_steps
+
+                # Perform a backward pass to calculate gradients
+                self.scaler.scale(scaled_loss).backward()
+
+                # If we've reached the end of the accumulation steps, perform a step of the optimizer
+                if (micro_step+1) % cfg.data.gradient_accumulation_steps == 0:
+                    # If a gradient clipping value is set in the configuration, clip the gradients
+                    if cfg.optimizer.grad_clip > 0:
+                        # Unscale the gradients before clipping
+                        self.scaler.unscale_(self.optimizer)
+                        # Clip the gradients of the model's parameters
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
+
+                    # Perform a step of the optimizer and update the gradient scaler
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    # Zero out the gradients to prepare for the next step
+                    self.optimizer.zero_grad(set_to_none=True)
+
+            # Add the loss for this batch to the total loss
+            total_loss += loss.item()
+
+        # Compute the average loss over all batches
+        avg_train_loss = total_loss / len(self.train_dataloader)
+
+        # Return the average loss for this epoch
+        return avg_train_loss
+    
+    @torch.no_grad()  # Disable gradient computation to save memory
+    def _eval(self, val_dl: torch.utils.data.DataLoader) -> float:
+        """
+        Evaluates the model on the validation data.
+
+        This method iterates over the validation DataLoader, performing a forward pass and computing the loss
+        for each batch of data. After completing the iteration, it computes the average validation loss and
+        returns it.
+
+        Args:
+            val_dl (torch.utils.data.DataLoader): The validation data loader.
+
+        Returns:
+            avg_val_loss (float): The average validation loss.
+
+        """
+        # Initialize the variable for tracking the total loss
+        total_loss = 0.0
+
+        # Set the model to evaluation mode. This disables operations like dropout.
+        self.model.eval()
+
+        # Iterate over all batches in the validation data loader
+        for x_batch, y_batch in val_dl:
+            # Move batch tensors to the same device as the model
+            x_batch = x_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
+
+            # Perform a forward pass through the model and compute the loss
+            logits, loss = self.model(x_batch, y_batch)
+
+            # Add the loss for this batch to the total loss
+            total_loss += loss.item()
+
+        # Compute the average loss over all batches
+        avg_val_loss = total_loss / len(val_dl)
+
+        # Return the average loss for the validation data
+        return avg_val_loss
 
     def train(self) -> float:
         """
@@ -375,118 +487,70 @@ class Trainer:
         iter_num = 0
         raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
         running_mfu = -1.0
-        best_val_loss = float('inf')
-
+        
         while True:
-            for x_batch, y_batch in self.train_dataloader:
-                # determine and set the learning rate for this iteration
-                lr = self.get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = lr
+            # determine and set the learning rate for this iteration
+            lr = self.get_lr(local_iter_num) if cfg.learning_rate.schedule else cfg.learning_rate.learning_rate
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
 
-                # evaluate the loss on train / val sets and write checkpoints
-                if iter_num % cfg.io_metrics.eval_interval == 0 and self.master_process:
-                    losses = self.batch_loss()
-                    print(f"step {iter_num}: train_loss = {losses['train_loss']:.3f}, \
-                            val_loss = {losses['val_loss']:.3f}")
-                    
-                    if cfg.io_metrics.wandb_log:
-                        wandb.log({
-                            'iter': iter_num,
-                            'train_loss': losses['train_loss'], 
-                            'val_loss': losses['val_loss'],
-                            'lr': lr,
-                            'mfu': running_mfu * 100, # log as percentage
-                        })
+            # train for one epoch
+            train_loss = self._train(self.train_dataloader)
 
-                    if losses['val_loss'] < best_val_loss or cfg.io_metrics.always_save_checkpoint:
-                        best_val_loss = losses['val_loss']
-                        if iter_num > 0:
-                            checkpoint = {
-                                'model': raw_model.state_dict(),
-                                'optimizer': self.optimizer.state_dict(),
-                                'model_args': {
-                                    'n_layer': cfg.gpt.n_layer,
-                                    'n_head': cfg.gpt.n_head,
-                                    'n_embd': cfg.gpt.n_embd,
-                                    'block_size': cfg.data.block_size,
-                                    'bias': cfg.gpt.bias,
-                                    'vocab_size': cfg.gpt.vocab_size,
-                                },
-                                'iter_num': iter_num,
-                                'best_val_loss': best_val_loss
-                            }
-                            print(f"Saving checkpoint to {cfg.io_metrics.out_dir}")
-                            torch.save(checkpoint, os.path.join(cfg.io_metrics.out_dir, 'checkpoint.pt'))
-
-                if iter_num == 0 and cfg.io_metrics.eval_only:
-                    return best_val_loss
-
-                # forward backward update, with optional gradiend accumulation to simulate larger batch_size
-                # and using the GradScaler if data type is float16
-                for micro_step in range(cfg.data.gradient_accumulation_steps):
-                    if self.ddp:
-                        # in DDP training we only need to sync gradients at the last micro step.
-                        # the official way to do this is with model.no_sync() context manager, but 
-                        # I really dislike that this bloats the code and forces us to repeat code
-                        # looking at the source of that context manager, it just toggles this variable
-                        self.model.require_backward_grad_sync = (micro_step == cfg.data.gradient_accumulation_steps - 1)
-                    with self.ctx:
-                        logits, loss = self.model(x_batch, y_batch)
-                        loss = loss / cfg.data.gradient_accumulation_steps
-                    
-                    # backward pass, with gradient scaling if training in fp16 mode
-                    self.scaler.scale(loss).backward()
+            # evaluate on validation set
+            if iter_num % cfg.io_metrics.eval_interval ==  0 and self.master_process:
+                val_loss = self._eval(self.val_dataloader)
+                print(f"epoch {iter_num} train_loss = {train_loss:.5f}, \
+                    val_loss = {val_loss:.5f}, lr = {lr:.5f}")
                 
-                # gradient clipping
-                if cfg.optimizer.grad_clip > 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
-
-                # optimizer step and scaler in case of fp16
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                # flush the gradients as soos as we can, no need for this memory anymore
-                self.optimizer.zero_grad(set_to_none=True)
-
-                # timing and logging
+                # Timing and logging
                 t1 = time.time()
                 dt = t1 - t0
                 t0 = t1
-
-                if iter_num % cfg.io_metrics.log_interval == 0 and self.master_process:
-                    # get loss as float. note this is CPU/GPU sync point
-                    # scale up to undo the division above, approximating the true total loss
-                    lossf = loss.item() * cfg.data.gradient_accumulation_steps
-                    if local_iter_num >= 5: # let the training loop settle a bit
-                        mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
-                        running_mfu = mfu if running_mfu == -1 else 0.9 * running_mfu + 0.1 * mfu
-                    
-                    print(f"step {iter_num}: train_loss = {lossf:.4f}, lr = {lr:.3e}, \
-                            time = {dt*1000:.4f}, mfu = {running_mfu * 100:.2f}%")
+                if local_iter_num >= 5: # let the training loop settle a bit
+                    mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
+                    running_mfu = mfu if running_mfu == -1 else 0.9*running_mfu + 0.1*mfu
+                print(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
                 
-                # increment the iteration number
-                iter_num += 1
-                local_iter_num += 1
+                if cfg.io_metrics.wandb_log:
+                    wandb.log({
+                        'iter': iter_num,
+                        'train_loss': train_loss, 
+                        'val_loss': val_loss, 
+                        'lr': lr,
+                        'mfu': running_mfu * 100, # in percent
+                    })
 
-            val_losses = []
-            for x_val, y_val in self.val_dataloader:
-                val_loss = self.batch_loss(x_val, y_val)
-                val_losses.append(val_loss)
-            avg_val_loss = sum(val_losses) / len(val_losses)
+                if val_loss < best_val_loss or cfg.io_metrics.always_save_checkpoint:
+                    best_val_loss = val_loss
+                    self._save_model(best_val_loss)
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                print(f"New best validation loss: {best_val_loss}")
+            if iter_num == 0 and cfg.io_metrics.eval_only:
+                break
 
-                # check if we've trained long enough
+            # increment the iteration number
+            iter_num += 1
+            local_iter_num += 1
+
+            # check if we've trained for the maximum number of iterations
             if iter_num >= cfg.optimizer.max_iters:
                 break
         
-        if self.ddp:
-            destroy_process_group()
-        
-        return best_val_loss
+    def _log_build_file_path(self):
+        """
+        Builds the file path for saving the model state.
+
+        Returns:
+            file_path_configs (dict): A dictionary containing the file format and arguments to be used for building the file path.
+        """
+
+        file_path_configs = {
+            "file_format": self.name + '_{}_{}_{}_{}_{}_{}_{}.state',
+            "args": (self.input_size, cfg.nn.hidden_size, self.output_size,
+                        cfg.nn.num_layers, cfg.comm.dropout, cfg.training.lr, cfg.training.weight_decay)
+        }
+
+        return file_path_configs
 
     @staticmethod
     def get_lr(it):
