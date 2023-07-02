@@ -1,14 +1,15 @@
 #!/bin/bash
 
-#SBATCH --job-name=python_job
-#SBATCH --output=python_job.out
-#SBATCH --partition=DGX
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=1G
-#SBATCH --time=00:10:00
+#SBATCH --job-name="script"
+#SBATCH --output=log.out
+#SBATCH --partition=EPYC
+#SBATCH	--nodes=1
+#SBATCH --exclusive
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=64
+#SBATCH --time=02:00:00
+#SBATCH --nodelist=epyc[005]
 
-module load python
-srun python3 ../cmd/train.py
+module load conda/23.3.1
+srun python ../cmd/train.py
 
