@@ -5,4 +5,5 @@ datasets
 tiktoken
 wandb
 tqdm
+regex
 

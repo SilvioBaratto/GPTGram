@@ -176,7 +176,7 @@ class GramTrainer:
 
         # Check if fused AdamW is available and if the device type is CUDA
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and cfg.system.device == 'cuda'
+        use_fused = fused_available and cfg.system.device.type == 'cuda'
 
         # Define extra arguments for the optimizer
         extra_args = dict(fused=True) if use_fused else dict()
@@ -208,7 +208,7 @@ class GramTrainer:
             >>> scaler = self._init_scaler()
         """
         # Check if the device type is CUDA and if the scaler is available
-        if cfg.system.device == 'cuda' and torch.cuda.amp is not None:
+        if cfg.system.device.type == 'cuda' and torch.cuda.amp is not None:
             # Initialize the scaler with the default settings
             scaler = torch.cuda.amp.GradScaler()
         else:
@@ -501,9 +501,9 @@ class GramTrainer:
         
         while True:
             # determine and set the learning rate for this iteration
-            # lr = self.get_lr(local_iter_num) if cfg.learning_rate.schedule else cfg.learning_rate.learning_rate
-            # for param_group in self.optimizer.param_groups:
-            #     param_group['lr'] = lr
+            lr = self.get_lr(local_iter_num) if cfg.learning_rate.schedule else cfg.learning_rate.learning_rate
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
 
             # train for one epoch
             train_loss = self._train(self.train_dataloader)

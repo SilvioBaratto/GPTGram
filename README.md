@@ -13,7 +13,7 @@ To install the package:
 
 ```bash
 > cd GPTGram
-> pip install .
+> ./install.sh
 ```
 
 ---
