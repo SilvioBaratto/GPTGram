@@ -9,5 +9,12 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=02:00:00
 
-srun python ../cmd/train.py
+# Activate the conda environment
+source activate GPTGram
+
+# Prepare the data
+srun python3 ../dataset/prepare_data.py --folder=../../data/chats/
+
+# Train the model
+srun python3 ../cmd/train.py
 
