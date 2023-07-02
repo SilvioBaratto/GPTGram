@@ -387,7 +387,7 @@ class GramTrainer:
             # Move batch tensors to the same device as the model
             x_batch = x_batch.to(self.device)
             y_batch = y_batch.to(self.device)
-
+         
             # Iterate over each accumulation step
             for micro_step in range(cfg.data.gradient_accumulation_steps):
                 if self.ddp:
@@ -504,7 +504,7 @@ class GramTrainer:
             lr = self.get_lr(local_iter_num) if cfg.learning_rate.schedule else cfg.learning_rate.learning_rate
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
-
+                
             # train for one epoch
             train_loss = self._train(self.train_dataloader)
 
@@ -556,9 +556,9 @@ class GramTrainer:
         """
 
         file_path_configs = {
-            "file_format": self.name + '_{}_{}_{}_{}_{}_{}_{}.state',
-            "args": (self.input_size, cfg.nn.hidden_size, self.output_size,
-                        cfg.nn.num_layers, cfg.comm.dropout, cfg.training.lr, cfg.training.weight_decay)
+            "file_format": cfg.io_metrics.wandb_run_name + '_{}_{}_{}_{}_{}_{}_{}.state',
+            "args": (cfg.gpt.block_size, cfg.gpt.vocab_size, cfg.gpt.n_layer,
+                        cfg.gpt.n_head, cfg.gpt.n_embd, cfg.gpt.dropout, cfg.gpt.bias)
         }
 
         return file_path_configs
