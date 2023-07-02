@@ -22,10 +22,39 @@ To install the package:
 
 This repository contains a Python script `prepare.py` in `data` folder that helps prepare chat data for training a language model. The script reads chat data from text files, filters out specified phrases (like "image omitted", "sticker omitted", etc.), removes timestamps, and encodes the text using Byte-Pair Encoding (BPE). The encoded tokens are then written to a binary output file.
 
-## Prerequisites
+### Installation Requirements
 
-- Python 3.6 or later
-- `tiktoken` Python library (you can install it with `pip install tiktoken`)
+Before using the GPTGram Telegram chatbot API, make sure to install the required dependencies listed in the `requirements.txt` file. Additionally, if you want to use Flash Attention instead of slow attention, it is recommended to install PyTorch 2.0 from the following sources based on your CUDA version:
+
+- If CUDA 11.8 is installed, run the following command:
+
+  ```bash
+  pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cu118
+  ```
+
+- If CUDA 11.7 is installed, run the following command:
+
+  ```bash
+  pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cu117
+  ```
+
+- If you are using CPU only, run the following command:
+
+  ```bash
+  pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cpu
+  ```
+
+These commands will install the necessary versions of NumPy, Torch, TorchVision, and TorchAudio based on your CUDA configuration.
+
+Finally, you can install the remaining dependencies using:
+
+```bash
+pip install -r requirements.txt
+```
+
+This will install all the required Python libraries and dependencies needed to run GPTGram successfully.
+
+---
 
 ## How to Use
 

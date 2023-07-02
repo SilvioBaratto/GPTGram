@@ -54,7 +54,7 @@ class GPT(nn.Module):
             wte = nn.Embedding(cfg.gpt.vocab_size, cfg.gpt.n_embd),
             wpe = nn.Embedding(cfg.gpt.block_size, cfg.gpt.n_embd),
             drop = nn.Dropout(cfg.gpt.dropout),
-            h = nn.ModuleList([Block(cfg.gpt) for _ in range(cfg.gpt.n_layer)]),
+            h = nn.ModuleList([Block() for _ in range(cfg.gpt.n_layer)]),
             ln_f = LayerNorm(),
         ))
         self.lm_head = nn.Linear(cfg.gpt.n_embd, cfg.gpt.vocab_size, bias=False)

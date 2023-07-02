@@ -33,8 +33,9 @@ class GramTrainer:
                    'bfloat16': torch.bfloat16, 
                    'float16': torch.float16
                    }[cfg.system.dtype]
-        self.ctx = nullcontext() if cfg.system.device == 'cpu' \
-                        else torch.amp.autocast(device_type=cfg.system.device, 
+        
+        self.ctx = nullcontext() if cfg.system.device.type == 'cpu' \
+                        else torch.amp.autocast(device_type=cfg.system.device.type, 
                                                 dtype=ptdtype)
         self.model = self.init_model()
         self.optimizer = self.init_optimizer()
@@ -154,7 +155,7 @@ class GramTrainer:
             >>> optimizer = gpt.configure_optimizers(0.01, 0.001, (0.9, 0.999), 'cuda')
         """
         # Get all parameters of the model that require gradients
-        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        param_dict = {pn: p for pn, p in self.model.named_parameters() if p.requires_grad}
 
         # Group the parameters based on their dimensionality
         decay_params = [p for p in param_dict.values() if p.dim() >= 2]  # 2D parameters will have weight decay
@@ -490,9 +491,9 @@ class GramTrainer:
         
         while True:
             # determine and set the learning rate for this iteration
-            lr = self.get_lr(local_iter_num) if cfg.learning_rate.schedule else cfg.learning_rate.learning_rate
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
+            # lr = self.get_lr(local_iter_num) if cfg.learning_rate.schedule else cfg.learning_rate.learning_rate
+            # for param_group in self.optimizer.param_groups:
+            #     param_group['lr'] = lr
 
             # train for one epoch
             train_loss = self._train(self.train_dataloader)
