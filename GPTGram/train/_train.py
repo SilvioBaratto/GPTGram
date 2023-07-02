@@ -16,7 +16,10 @@ from ..model import GPT
 
 class GramTrainer:
 
-    def __init__(self, filepath):
+    def __init__(self, 
+                 filepath: str = None,
+                 **kwargs):
+        
         train_file = os.path.join(filepath, 'train.bin')
         val_file = os.path.join(filepath, 'val.bin')
 
@@ -27,6 +30,8 @@ class GramTrainer:
         # create dataloaders
         self.train_dataloader = self.init_dataloader(train_file)
         self.val_dataloader = self.init_dataloader(val_file)
+
+        self._init_config(**kwargs)  # Call _init_config with kwargs
 
         self.ddp_init()
         ptdtype = {'float32': torch.float32, 
@@ -39,10 +44,32 @@ class GramTrainer:
                                                 dtype=ptdtype)
         self.model = self.init_model()
         self.optimizer = self.init_optimizer()
+        self.scaler = self._init_scaler()
 
         if cfg.io_metrics.wandb_log and self.master_process:
             wandb.init(project=cfg.io_metrics.wandb_project, 
                        name=cfg.io_metrics.wandb_run_name)
+            
+    def _init_config(self, **kwargs):
+        """
+        Initialize the configuration for the trainer.
+
+        This method first loads the default configuration from the 'config.py' file.
+        It then updates the configuration with any keyword arguments passed to the method.
+        Finally, it sets the seed for the random number generator to ensure reproducibility.
+
+        Args:
+            **kwargs: Arbitrary keyword arguments.
+
+        Returns:
+            None
+
+        Raises:
+            None
+        """
+        # Update the configuration with any keyword arguments passed to the method
+        for key, value in kwargs.items():
+            setattr(cfg, key, value)
 
     def ddp_init(self):
         """
@@ -104,32 +131,6 @@ class GramTrainer:
 
         # Seed the random number generator for torch to ensure reproducibility.
         torch.manual_seed(1337 + self.seed_offset)
-
-    def init_scaler(self):
-        """
-        Initialize the scaler for mixed precision training.
-
-        This method first checks if the device type is CUDA and if the scaler is available.
-        If both conditions are met, it initializes the scaler with the default settings.
-
-        Args:
-            None
-
-        Returns:
-            torch.cuda.amp.GradScaler: The initialized scaler.
-
-        Examples:
-            >>> scaler = self.init_scaler()
-        """
-        # Check if the device type is CUDA and if the scaler is available
-        if cfg.system.device == 'cuda' and torch.cuda.amp is not None:
-            # Initialize the scaler with the default settings
-            scaler = torch.cuda.amp.GradScaler(enabled=(cfg.system.dtype == 'float16'))
-        else:
-            # If the device type is not CUDA or the scaler is not available, return a null context
-            scaler = nullcontext()
-
-        return scaler
 
     def init_optimizer(self):
         """
@@ -403,21 +404,30 @@ class GramTrainer:
                     # Scale the loss by the number of gradient accumulation steps
                     scaled_loss = loss / cfg.data.gradient_accumulation_steps
 
-                # Perform a backward pass to calculate gradients
-                self.scaler.scale(scaled_loss).backward()
+                if cfg.system.device.type == 'cuda':
+                    # Perform a backward pass to calculate gradients
+                    self.scaler.scale(scaled_loss).backward()
+                else:
+                    # Perform a backward pass to calculate gradients
+                    scaled_loss.backward()
 
                 # If we've reached the end of the accumulation steps, perform a step of the optimizer
                 if (micro_step+1) % cfg.data.gradient_accumulation_steps == 0:
                     # If a gradient clipping value is set in the configuration, clip the gradients
                     if cfg.optimizer.grad_clip > 0:
-                        # Unscale the gradients before clipping
-                        self.scaler.unscale_(self.optimizer)
+                        if cfg.system.device.type == 'cuda':
+                            # Unscale the gradients before clipping
+                            self.scaler.unscale_(self.optimizer)
                         # Clip the gradients of the model's parameters
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
 
-                    # Perform a step of the optimizer and update the gradient scaler
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+                        if cfg.system.device.type == 'cuda':
+                            # Perform a step of the optimizer and update the gradient scaler
+                            self.scaler.step(self.optimizer)
+                            self.scaler.update()
+                        else:
+                            # Perform a step of the optimizer
+                            self.optimizer.step()
                     # Zero out the gradients to prepare for the next step
                     self.optimizer.zero_grad(set_to_none=True)
 

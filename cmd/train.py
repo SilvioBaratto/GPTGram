@@ -1,6 +1,6 @@
 import argparse
 import torch
-from config import Config as cfg
+from GPTGram import GramTrainer
 
 def arg_parser():
     parser = argparse.ArgumentParser(description='GPT Configuration')
@@ -55,43 +55,9 @@ def arg_parser():
 
     args = parser.parse_args()
 
-    # Set values for GPTConfig
-    for key, value in vars(args).items():
-        setattr(cfg.gpt, key, value)
-
-    # Set values for IOMetricsConfig
-    for key, value in vars(args).items():
-        setattr(cfg.io_metrics, key, value)
-
-    # Set values for DataConfig
-    for key, value in vars(args).items():
-        setattr(cfg.data, key, value)
-
-    # Set values for ModelConfig
-    for key, value in vars(args).items():
-        setattr(cfg.model, key, value)
-
-    # Set values for OptimizerConfig
-    for key, value in vars(args).items():
-        setattr(cfg.optimizer, key, value)
-
-    # Set values for LearningRateConfig
-    for key, value in vars(args).items():
-        setattr(cfg.learning_rate, key, value)
-
-    # Set values for DDPConfig
-    for key, value in vars(args).items():
-        setattr(cfg.ddp, key, value)
-
-    # Set values for SystemConfig
-    for key, value in vars(args).items():
-        setattr(cfg.system, key, value)
-
-    # Set values for SamplingConfig
-    for key, value in vars(args).items():
-        setattr(cfg.sampling, key, value)
-
-def 
+    return args
 
 if __name__ == '__main__':
-    pass
+    args = arg_parser()
+    trainer = GramTrainer(filepath='../dataset/', **vars(args))
+    trainer.train()
