@@ -524,6 +524,7 @@ class GramTrainer:
                              leave=True):
             
             # determine and set the learning rate for this iteration
+            print(cfg.learning_rate)
             lr = self.get_lr(local_iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr

@@ -53,6 +53,9 @@ def arg_parser():
     parser.add_argument('--top_k', type=int, default=200, help='Top k')
     parser.add_argument('--seed', type=int, default=1337, help='Seed')
 
+    parser.add_argument('--folder', type=str, default='models', help='Folder for models')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers')
+
     args = parser.parse_args()
 
     return args
