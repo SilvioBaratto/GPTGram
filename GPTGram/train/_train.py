@@ -525,9 +525,10 @@ class GramTrainer:
             
             # determine and set the learning rate for this iteration
             # lr = self.get_lr(local_iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
-            
+
             for param_group in self.optimizer.param_groups:
-                param_group['lr'] = cfg.learning_rate.learning_rate
+                # param_group['lr'] = cfg.learning_rate.learning_rate
+                param_group['lr'] = 6e-4
                 
             # train for one epoch
             train_loss = self._train(self.train_dataloader)
