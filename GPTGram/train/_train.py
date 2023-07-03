@@ -10,6 +10,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.distributed import init_process_group, destroy_process_group
+from tqdm.auto import tqdm
 from ..config import Config as cfg
 from ..preprocessing import GramDataset
 from ..model import GPT
@@ -39,7 +40,7 @@ class GramTrainer:
                    'float16': torch.float16
                    }[cfg.system.dtype]
         
-        self.ctx = nullcontext() if cfg.system.device.type == 'cpu' \
+        self.ctx = nullcontext() if cfg.system.use_cuda is False \
                         else torch.amp.autocast(device_type=cfg.system.device.type, 
                                                 dtype=ptdtype)
         self.model = self.init_model()
@@ -176,7 +177,7 @@ class GramTrainer:
 
         # Check if fused AdamW is available and if the device type is CUDA
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and cfg.system.device.type == 'cuda'
+        use_fused = fused_available and cfg.system.use_cuda
 
         # Define extra arguments for the optimizer
         extra_args = dict(fused=True) if use_fused else dict()
@@ -208,7 +209,7 @@ class GramTrainer:
             >>> scaler = self._init_scaler()
         """
         # Check if the device type is CUDA and if the scaler is available
-        if cfg.system.device.type == 'cuda' and torch.cuda.amp is not None:
+        if cfg.system.use_cuda and torch.cuda.amp is not None:
             # Initialize the scaler with the default settings
             scaler = torch.cuda.amp.GradScaler()
         else:
@@ -235,24 +236,41 @@ class GramTrainer:
         return dataloader
     
     def init_model(self):
+        """
+        Initializes the model for training.
 
-        # Initialize the model
+        This method initializes a model for training. It supports starting from a
+        pretrained model or resuming from a checkpoint. 
+
+        If the model is initialized with CUDA support, it will be moved to the 
+        appropriate device. 
+
+        Returns:
+            model (GPT): The initialized model.
+        """
+
+        # Initialize a new instance of the model
         model = GPT()
 
-        # Load the pretrained model if specified
+        # If specified in the configuration, load a checkpointed model to resume training
         if cfg.io_metrics.init_from == 'resume':
             self._load_model(model)
 
+        # Alternatively, if specified in the configuration, initialize the model with pretrained GPT-2 weights
         elif cfg.io_metrics.init_from.startswith('gpt2'):
             print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
             model = GPT.from_pretrained(cfg.io_metrics.init_from)
         
+        # If CUDA is available and specified in the configuration, move the model to the GPU
+        # In the case of distributed data parallelism (DDP) with more than one GPU, 
+        # wrap the model in a DDP container.
         if cfg.system.use_cuda:
             print(f"Using CUDA; {torch.cuda.device_count()} devices.")
             if self.ddp and torch.cuda.device_count() > 1:
                 model = DDP(model, device_ids=[self.ddp_local_rank])
             model = model.to(self.device)
 
+        # Return the initialized model
         return model
 
     def _save_model(self, best_val_loss: float = None):
@@ -334,7 +352,7 @@ class GramTrainer:
         print(f"Resuming training from {lib_dir}")
 
         # Load the state from the file path
-        checkpoint = torch.load(file_path, map_location=cfg.system.device)
+        checkpoint = torch.load(file_path, map_location=self.device)
         
         # Update the 'model_args', 'iter_num', 'best_val_loss', and 'config' attributes
         self.model_args = checkpoint['model_args']
@@ -404,7 +422,7 @@ class GramTrainer:
                     # Scale the loss by the number of gradient accumulation steps
                     scaled_loss = loss / cfg.data.gradient_accumulation_steps
 
-                if cfg.system.device.type == 'cuda':
+                if cfg.system.use_cuda:
                     # Perform a backward pass to calculate gradients
                     self.scaler.scale(scaled_loss).backward()
                 else:
@@ -415,13 +433,13 @@ class GramTrainer:
                 if (micro_step+1) % cfg.data.gradient_accumulation_steps == 0:
                     # If a gradient clipping value is set in the configuration, clip the gradients
                     if cfg.optimizer.grad_clip > 0:
-                        if cfg.system.device.type == 'cuda':
+                        if cfg.system.use_cuda:
                             # Unscale the gradients before clipping
                             self.scaler.unscale_(self.optimizer)
                         # Clip the gradients of the model's parameters
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
 
-                        if cfg.system.device.type == 'cuda':
+                        if cfg.system.use_cuda:
                             # Perform a step of the optimizer and update the gradient scaler
                             self.scaler.step(self.optimizer)
                             self.scaler.update()
@@ -499,7 +517,12 @@ class GramTrainer:
         raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
         running_mfu = -1.0
         
-        while True:
+        for iter_num in tqdm(range(cfg.optimizer.max_iters), 
+                             desc="Training", 
+                             unit="iteration",
+                             position=0,
+                             leave=True):
+            
             # determine and set the learning rate for this iteration
             lr = self.get_lr(local_iter_num) if cfg.learning_rate.schedule else cfg.learning_rate.learning_rate
             for param_group in self.optimizer.param_groups:
@@ -511,8 +534,8 @@ class GramTrainer:
             # evaluate on validation set
             if iter_num % cfg.io_metrics.eval_interval ==  0 and self.master_process:
                 val_loss = self._eval(self.val_dataloader)
-                print(f"epoch {iter_num} train_loss = {train_loss:.5f}, \
-                    val_loss = {val_loss:.5f}, lr = {lr:.5f}")
+                tqdm.write(f"epoch {iter_num} train_loss = {train_loss:.5f}, \
+                    val_loss = {val_loss:.5f}, lr = {lr:.5f}", end='\r')
                 
                 # Timing and logging
                 t1 = time.time()
@@ -521,7 +544,8 @@ class GramTrainer:
                 if local_iter_num >= 5: # let the training loop settle a bit
                     mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
                     running_mfu = mfu if running_mfu == -1 else 0.9*running_mfu + 0.1*mfu
-                print(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+                tqdm.write(f"iter {iter_num}: loss {train_loss:.4f}, \
+                           time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%", end='\r')
                 
                 if cfg.io_metrics.wandb_log:
                     wandb.log({
@@ -539,14 +563,8 @@ class GramTrainer:
             if iter_num == 0 and cfg.io_metrics.eval_only:
                 break
 
-            # increment the iteration number
-            iter_num += 1
             local_iter_num += 1
 
-            # check if we've trained for the maximum number of iterations
-            if iter_num >= cfg.optimizer.max_iters:
-                break
-        
     def _log_build_file_path(self):
         """
         Builds the file path for saving the model state.
