@@ -113,10 +113,10 @@ class GramTrainer:
         # If the device type is CUDA, move the model to the appropriate device and initialize DataParallel
         if cfg.system.use_cuda:
             print(f"Using CUDA; {torch.cuda.device_count()} devices.")
-            model = model.to(self.device)
-            model = DataParallel(model, device_ids=self.device)
-
-        # Return the initialized model
+            model = model.to(self.device[0]) if isinstance(self.device, list) else model.to(self.device)
+            if isinstance(self.device, list):
+                model = DataParallel(model, device_ids=self.device)
+                
         return model
 
     def init_optimizer(self):
