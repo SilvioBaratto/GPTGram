@@ -34,7 +34,7 @@ class GramTrainer:
 
         self._init_config(**kwargs)  # Call _init_config with kwargs
 
-        self.ddp_init()
+        self.init_device()
         ptdtype = {'float32': torch.float32, 
                    'bfloat16': torch.bfloat16, 
                    'float16': torch.float16
@@ -72,66 +72,51 @@ class GramTrainer:
         for key, value in kwargs.items():
             setattr(cfg, key, value)
 
-    def ddp_init(self):
+    def init_device(self):
         """
-        Initialize the Distributed Data Parallel (DDP) training.
+        Initialize the device(s) for the training.
 
-        This function first checks whether the environment variable 'RANK' is set or not. The existence
-        of 'RANK' indicates that the program is being run in a DDP mode. 
-
-        If the DDP mode is detected, it further initializes the process group for torch.distributed package, 
-        sets the current device, determines if the current process is the master process (for logging and 
-        checkpointing purposes), sets the seed offset (for random number generation), and calculates the world size
-        (i.e., the total number of processes that will be simultaneously training).
-
-        If the DDP mode is not detected (i.e., if the environment variable 'RANK' is not set), it defaults 
-        to a single GPU, single process setup.
-
-        The method also sets a deterministic seed for torch's random number generator to ensure the 
-        reproducibility of the training process.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            None
+        If multiple GPUs are available, use all of them. If not, use CPU.
         """
-        # Check if the 'RANK' environment variable is set. If it is, we are in a DDP setup.
-        self.ddp = int(os.environ.get('RANK', -1)) != -1
 
-        if self.ddp:
-            # Initialize the torch.distributed process group with NCCL backend which is the standard for multi-GPU training.
-            init_process_group(backend='nccl')
-
-            # Set the distributed training related attributes.
-            self.ddp_rank = int(os.environ['RANK'])
-            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
-            self.device = f'cuda:{self.ddp_local_rank}'
-
-            # Set the current CUDA device to the local rank.
-            torch.cuda.set_device(self.device)
-
-            # The process with rank 0 is deemed the master process. This is a common practice and helps manage logging,
-            # checkpointing and other similar tasks which you only want performed once.
-            self.master_process = self.ddp_rank == 0
-
-            # Set the seed offset to the rank of the process. Each process gets a different seed.
-            self.seed_offset = self.ddp_rank
-
-            # Set the world size to the number of processes participating in the distributed training.
-            self.ddp_world_size = int(os.environ['WORLD_SIZE'])
+        if torch.cuda.device_count() > 1:
+            self.device = [f'cuda:{i}' for i in range(torch.cuda.device_count())]
         else:
-            # If not in DDP mode, we default to a single process, single GPU setup.
-            self.master_process = True
-            self.seed_offset = 0
-            self.ddp_world_size = 1
             self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
-        # Seed the random number generator for torch to ensure reproducibility.
-        torch.manual_seed(1337 + self.seed_offset)
+    def init_model(self):
+        """
+        Initializes the model for training.
+
+        This method initializes a model for training. It supports starting from a
+        pretrained model or resuming from a checkpoint. 
+
+        If the model is initialized with CUDA support, it will be moved to the 
+        appropriate device. 
+
+        Returns:
+            model (GPT): The initialized model.
+        """
+
+        # Initialize a new instance of the model
+        model = GPT()
+
+        # If specified in the configuration, load a checkpointed model to resume training
+        if cfg.io_metrics.init_from == 'resume':
+            self._load_model(model)
+
+        # Alternatively, if specified in the configuration, initialize the model with pretrained GPT-2 weights
+        elif cfg.io_metrics.init_from.startswith('gpt2'):
+            print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
+            model = GPT.from_pretrained(cfg.io_metrics.init_from)
+        
+        # If CUDA is available and specified in the configuration, move the model to the GPU
+        if cfg.system.use_cuda:
+            print(f"Using CUDA; {torch.cuda.device_count()} devices.")
+            model = model.to(self.device)
+
+        # Return the initialized model
+        return model
 
     def init_optimizer(self):
         """
@@ -234,44 +219,7 @@ class GramTrainer:
         )
 
         return dataloader
-    
-    def init_model(self):
-        """
-        Initializes the model for training.
 
-        This method initializes a model for training. It supports starting from a
-        pretrained model or resuming from a checkpoint. 
-
-        If the model is initialized with CUDA support, it will be moved to the 
-        appropriate device. 
-
-        Returns:
-            model (GPT): The initialized model.
-        """
-
-        # Initialize a new instance of the model
-        model = GPT()
-
-        # If specified in the configuration, load a checkpointed model to resume training
-        if cfg.io_metrics.init_from == 'resume':
-            self._load_model(model)
-
-        # Alternatively, if specified in the configuration, initialize the model with pretrained GPT-2 weights
-        elif cfg.io_metrics.init_from.startswith('gpt2'):
-            print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
-            model = GPT.from_pretrained(cfg.io_metrics.init_from)
-        
-        # If CUDA is available and specified in the configuration, move the model to the GPU
-        # In the case of distributed data parallelism (DDP) with more than one GPU, 
-        # wrap the model in a DDP container.
-        if cfg.system.use_cuda:
-            print(f"Using CUDA; {torch.cuda.device_count()} devices.")
-            if self.ddp and torch.cuda.device_count() > 1:
-                model = DDP(model, device_ids=[self.ddp_local_rank])
-            model = model.to(self.device)
-
-        # Return the initialized model
-        return model
 
     def _save_model(self, best_val_loss: float = None):
         """
@@ -405,22 +353,16 @@ class GramTrainer:
             # Move batch tensors to the same device as the model
             x_batch = x_batch.to(self.device)
             y_batch = y_batch.to(self.device)
-         
+        
             # Iterate over each accumulation step
             for micro_step in range(cfg.data.gradient_accumulation_steps):
-                if self.ddp:
-                    # in DDP training we only need to sync gradients at the last micro step.
-                    # this attribute is used to ensure that gradients are only synchronized 
-                    # (summed across all devices) at the end of all gradient accumulation steps, 
-                    # which can save on communication costs.
-                    self.model.require_backward_grad_sync = (micro_step == cfg.data.gradient_accumulation_steps - 1)
-
                 # Perform a forward pass through the model, getting the logits and loss
                 # Note: the context manager is used to enable mixed precision training
                 with self.ctx:
                     logits, loss = self.model(x_batch, y_batch)
-                    # Scale the loss by the number of gradient accumulation steps
-                    scaled_loss = loss / cfg.data.gradient_accumulation_steps
+
+                # Scale the loss by the number of gradient accumulation steps
+                scaled_loss = loss / cfg.data.gradient_accumulation_steps
 
                 if cfg.system.use_cuda:
                     # Perform a backward pass to calculate gradients
@@ -446,14 +388,15 @@ class GramTrainer:
                         else:
                             # Perform a step of the optimizer
                             self.optimizer.step()
+
                     # Zero out the gradients to prepare for the next step
                     self.optimizer.zero_grad(set_to_none=True)
 
-            # Add the loss for this batch to the total loss
-            total_loss += loss.item()
+                # Add the scaled loss for this batch to the total loss
+                total_loss += scaled_loss.item()
 
-        # Compute the average loss over all batches
-        avg_train_loss = total_loss / len(self.train_dataloader)
+            # Compute the average loss over all batches
+            avg_train_loss = total_loss / len(self.train_dataloader)
 
         # Return the average loss for this epoch
         return avg_train_loss
