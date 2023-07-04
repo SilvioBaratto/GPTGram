@@ -7,7 +7,7 @@ from contextlib import nullcontext
 import wandb
 import numpy as np
 import torch
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.parallel import DataParallel 
 from torch.utils.data import DataLoader
 from torch.distributed import init_process_group, destroy_process_group
 from tqdm.auto import tqdm
@@ -109,11 +109,12 @@ class GramTrainer:
         elif cfg.io_metrics.init_from.startswith('gpt2'):
             print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
             model = GPT.from_pretrained(cfg.io_metrics.init_from)
-        
-        # If CUDA is available and specified in the configuration, move the model to the GPU
+
+        # If the device type is CUDA, move the model to the appropriate device and initialize DataParallel
         if cfg.system.use_cuda:
             print(f"Using CUDA; {torch.cuda.device_count()} devices.")
             model = model.to(self.device)
+            model = DataParallel(model, device_ids=self.device)
 
         # Return the initialized model
         return model
