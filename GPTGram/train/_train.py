@@ -537,7 +537,7 @@ class GramTrainer:
             if iter_num % cfg.io_metrics.eval_interval ==  0 and self.master_process:
                 val_loss = self._eval(self.val_dataloader)
                 tqdm.write(f"epoch {iter_num} train_loss = {train_loss:.5f}, \
-                    val_loss = {val_loss:.5f}, lr = {lr:.5f}", end='\r')
+                    val_loss = {val_loss:.5f}, lr = {6e-4:.5f}", end='\r')
                 
                 # Timing and logging
                 t1 = time.time()
@@ -554,7 +554,7 @@ class GramTrainer:
                         'iter': iter_num,
                         'train_loss': train_loss, 
                         'val_loss': val_loss, 
-                        'lr': lr,
+                        'lr': 6e-4,
                         'mfu': running_mfu * 100, # in percent
                     })
 
