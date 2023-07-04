@@ -4,6 +4,8 @@ from GPTGram import GramTrainer
 
 def arg_parser():
     parser = argparse.ArgumentParser(description='GPT Configuration')
+    
+    parser.add_argument('--local-rank', type=int, default=0, help='Local rank for distributed training')
     parser.add_argument('--block_size', type=int, default=1024, help='Block size')
     parser.add_argument('--vocab_size', type=int, default=50304, help='Vocabulary size')
     parser.add_argument('--n_layer', type=int, default=12, help='Number of layers')
@@ -62,5 +64,9 @@ def arg_parser():
 
 if __name__ == '__main__':
     args = arg_parser()
+    if args.local_rank is not None:
+        torch.cuda.set_device(args.local_rank)
+        torch.distributed.init_process_group(backend='nccl', init_method='env://')
+        
     trainer = GramTrainer(filepath='../dataset/', **vars(args))
     trainer.train()
