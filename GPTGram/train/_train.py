@@ -352,8 +352,8 @@ class GramTrainer:
         # Iterate over all batches in the training data loader
         for x_batch, y_batch in self.train_dataloader:
             # Move batch tensors to the same device as the model
-            x_batch = x_batch.to(self.device)
-            y_batch = y_batch.to(self.device)
+            x_batch = x_batch.to(self.device[0]) if isinstance(self.device, list) else x_batch.to(self.device)
+            y_batch = y_batch.to(self.device[0]) if isinstance(self.device, list) else y_batch.to(self.device)
         
             # Iterate over each accumulation step
             for micro_step in range(cfg.data.gradient_accumulation_steps):
@@ -427,8 +427,8 @@ class GramTrainer:
         # Iterate over all batches in the validation data loader
         for x_batch, y_batch in val_dl:
             # Move batch tensors to the same device as the model
-            x_batch = x_batch.to(self.device)
-            y_batch = y_batch.to(self.device)
+            x_batch = x_batch.to(self.device[0]) if isinstance(self.device, list) else x_batch.to(self.device)
+            y_batch = y_batch.to(self.device[0]) if isinstance(self.device, list) else y_batch.to(self.device)
 
             # Perform a forward pass through the model and compute the loss
             logits, loss = self.model(x_batch, y_batch)
