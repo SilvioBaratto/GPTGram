@@ -351,13 +351,15 @@ class GramTrainer:
 
                 # Scale the loss by the number of gradient accumulation steps
                 scaled_loss = loss / cfg.data.gradient_accumulation_steps
+                # Sum the losses
+                summed_loss = scaled_loss.sum()
 
                 if cfg.system.use_cuda:
                     # Perform a backward pass to calculate gradients
-                    self.scaler.scale(scaled_loss).backward()
+                    self.scaler.scale(summed_loss).backward()
                 else:
                     # Perform a backward pass to calculate gradients
-                    scaled_loss.backward()
+                    summed_loss.backward()
 
                 # If we've reached the end of the accumulation steps, perform a step of the optimizer
                 if (micro_step+1) % cfg.data.gradient_accumulation_steps == 0:
@@ -381,7 +383,7 @@ class GramTrainer:
                     self.optimizer.zero_grad(set_to_none=True)
 
                 # Add the scaled loss for this batch to the total loss
-                total_loss += scaled_loss.item()
+                total_loss += summed_loss.item()
 
             # Compute the average loss over all batches
             avg_train_loss = total_loss / len(self.train_dataloader)
