@@ -458,7 +458,7 @@ class GramTrainer:
         local_iter_num = 0
         # number of iteration in the current epoch
         iter_num = 0
-        raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
+        raw_model = self.model.module if isinstance(self.model, DataParallel) else self.model
         running_mfu = -1.0
         
         for iter_num in tqdm(range(cfg.optimizer.max_iters), 
