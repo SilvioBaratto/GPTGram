@@ -1,5 +1,9 @@
-#Ignore dataset upload
+# Ignore dataset upload
 /data/
+
+# Ignore train.bin and val.bin in folder dataset:
+dataset/train.bin
+dataset/val.bin
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
