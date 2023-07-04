@@ -9,7 +9,6 @@ import numpy as np
 import torch
 from torch.nn.parallel import DataParallel 
 from torch.utils.data import DataLoader
-from torch.distributed import init_process_group, destroy_process_group
 from tqdm.auto import tqdm
 from ..config import Config as cfg
 from ..preprocessing import GramDataset
@@ -34,7 +33,6 @@ class GramTrainer:
 
         self._init_config(**kwargs)  # Call _init_config with kwargs
 
-        self.init_device()
         ptdtype = {'float32': torch.float32, 
                    'bfloat16': torch.bfloat16, 
                    'float16': torch.float16
@@ -72,18 +70,6 @@ class GramTrainer:
         for key, value in kwargs.items():
             setattr(cfg, key, value)
 
-    def init_device(self):
-        """
-        Initialize the device(s) for the training.
-
-        If multiple GPUs are available, use all of them. If not, use CPU.
-        """
-
-        if torch.cuda.device_count() > 1:
-            self.device = [f'cuda:{i}' for i in range(torch.cuda.device_count())]
-        else:
-            self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-
     def init_model(self):
         """
         Initializes the model for training.
@@ -113,10 +99,11 @@ class GramTrainer:
         # If the device type is CUDA, move the model to the appropriate device and initialize DataParallel
         if cfg.system.use_cuda:
             print(f"Using CUDA; {torch.cuda.device_count()} devices.")
-            model = model.to(self.device[0]) if isinstance(self.device, list) else model.to(self.device)
-            if isinstance(self.device, list):
-                model = DataParallel(model, device_ids=self.device)
-                
+            if torch.cuda.device_count() > 1:
+                model = DataParallel(model)
+
+            model = model.to(cfg.system.device)
+                            
         return model
 
     def init_optimizer(self):
@@ -301,7 +288,7 @@ class GramTrainer:
         print(f"Resuming training from {lib_dir}")
 
         # Load the state from the file path
-        checkpoint = torch.load(file_path, map_location=self.device)
+        checkpoint = torch.load(file_path, map_location=cfg.system.devices)
         
         # Update the 'model_args', 'iter_num', 'best_val_loss', and 'config' attributes
         self.model_args = checkpoint['model_args']
@@ -352,8 +339,8 @@ class GramTrainer:
         # Iterate over all batches in the training data loader
         for x_batch, y_batch in self.train_dataloader:
             # Move batch tensors to the same device as the model
-            x_batch = x_batch.to(self.device[0]) if isinstance(self.device, list) else x_batch.to(self.device)
-            y_batch = y_batch.to(self.device[0]) if isinstance(self.device, list) else y_batch.to(self.device)
+            x_batch = x_batch.to(cfg.system.device)
+            y_batch = y_batch.to(cfg.system.device)
         
             # Iterate over each accumulation step
             for micro_step in range(cfg.data.gradient_accumulation_steps):
@@ -427,8 +414,8 @@ class GramTrainer:
         # Iterate over all batches in the validation data loader
         for x_batch, y_batch in val_dl:
             # Move batch tensors to the same device as the model
-            x_batch = x_batch.to(self.device[0]) if isinstance(self.device, list) else x_batch.to(self.device)
-            y_batch = y_batch.to(self.device[0]) if isinstance(self.device, list) else y_batch.to(self.device)
+            x_batch = x_batch.to(cfg.system.device)
+            y_batch = y_batch.to(cfg.system.device)
 
             # Perform a forward pass through the model and compute the loss
             logits, loss = self.model(x_batch, y_batch)
