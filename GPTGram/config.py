@@ -1,5 +1,7 @@
 import torch
+from contextlib import nullcontext
 from dataclasses import dataclass
+import os
 
 @dataclass
 class GPTConfig:
@@ -53,6 +55,13 @@ class LearningRateConfig:
 @dataclass
 class DDPConfig:
     backend: str = 'nccl'
+    ddp: bool = int(os.environ.get('RANK', -1)) != -1
+    ddp_rank: int = int(os.environ['RANK'])
+    ddp_local_rank: int = int(os.environ['LOCAL_RANK'])
+    ddp_world_size: int = int(os.environ['WORLD_SIZE'])
+    device: str = f'cuda:{ddp_local_rank}'
+    master_process: bool = ddp_rank == 0
+
 
 @dataclass
 class SystemConfig:

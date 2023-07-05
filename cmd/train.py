@@ -1,6 +1,9 @@
 import argparse
 import torch
+import os
+from torch.distributed import init_process_group, destroy_process_group
 from GPTGram import GramTrainer
+from GPTGram.config import Config as cfg
 
 def arg_parser():
     parser = argparse.ArgumentParser(description='GPT Configuration')
@@ -63,7 +66,23 @@ def arg_parser():
     return args
 
 if __name__ == '__main__':
-    args = arg_parser()
 
+    if cfg.ddp.ddp:
+        init_process_group(backend='gloo|nccl')
+        assert cfg.data.gradient_accumulation_steps % cfg.ddp.ddp_world_size == 0, 'gradient_accumulation_steps must be divisible by the number of processes'
+        cfg.data.gradient_accumulation_steps //= cfg.ddp.ddp_world_size
+    
+    else:
+        seed_offset = 0
+        cfg.ddp.ddp_world_size = 1
+
+    torch.manual_seed(1337 + seed_offset)
+    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+    
+    args = arg_parser()
     trainer = GramTrainer(filepath='../dataset/', **vars(args))
     trainer.train()
+
+    if cfg.ddp.ddp:
+        destroy_process_group()

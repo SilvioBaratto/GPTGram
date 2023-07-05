@@ -8,7 +8,6 @@ import wandb
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from ..config import Config as cfg
@@ -37,7 +36,6 @@ class GramTrainer:
         print(f"val_dataloader: {len(self.val_dataloader)} batches")
 
         self._init_config(**kwargs)  # Call _init_config with kwargs
-        self._init_ddp()  # Call _init_ddp
 
         self.model = self.init_model()
         self.optimizer = self.init_optimizer()
@@ -48,56 +46,17 @@ class GramTrainer:
             self.model = torch.compile(self.model)
 
         # wrap model into DDP container
-        if self.ddp:
+        if cfg.ddp.ddp:
             self.model = DDP(self.model, 
-                             device_ids=[self.ddp_local_rank],
-                             output_device=self.ddp_local_rank)
-
-        if cfg.io_metrics.wandb_log and self.master_process:
+                             device_ids=[cfg.ddp.ddp_local_rank],
+                             output_device=cfg.ddp.ddp_local_rank)
+            
+        self.device = cfg.ddp.device if cfg.ddp.ddp else cfg.system.device
+            
+        if cfg.io_metrics.wandb_log and cfg.ddp.master_process:
             wandb.init(project=cfg.io_metrics.wandb_project, 
                        name=cfg.io_metrics.wandb_run_name)
             
-    def _init_ddp(self):
-        """
-        Initialize distributed data parallel (DDP) training.
-
-        This method initializes DDP training if the number of GPUs specified in the configuration is greater than 1.
-        It first initializes the process group using the 'nccl' backend. It then wraps the model in a DDP container.
-
-        Args:
-            None
-
-        Returns:
-            None
-
-        Raises:
-            None
-        """
-        # If the number of GPUs specified in the configuration is greater than 1, initialize DDP training
-        self.ddp = int(os.environ.get('RANK', -1)) != -1 
-        if self.ddp:
-            init_process_group(backend='nccl')
-            ddp_rank = int(os.environ['RANK'])
-            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
-            ddp_world_size = int(os.environ['WORLD_SIZE'])
-            self.device = f'cuda:{self.ddp_local_rank}'
-            torch.cuda.set_device(self.device)
-            self.master_process = ddp_rank == 0 # only the master process will log to wandb
-            self.seed_offset = ddp_rank # each process will have a different seed
-            # world_size number of process will be training simultneously, so we can scale
-            # down the desired gradient accumulation iterations per process proportionally
-            assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
-            cfg.data.gradient_accumulation_steps = cfg.data.gradient_accumulation_steps // ddp_world_size
-        else:
-            self.master_process = True
-            self.seed_offset = 0
-            ddp_world_size = 1
-            self.device = cfg.system.device
-
-        torch.manual_seed(1337 + self.seed_offset)
-        torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-        torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-        
         ptdtype = {'float32': torch.float32,
                      'bfloat16': torch.bfloat16,
                      'float16': torch.float16
@@ -106,8 +65,7 @@ class GramTrainer:
         self.ctx = nullcontext() if cfg.system.use_cuda is False \
                             else torch.amp.autocast(device_type=cfg.system.device.type,
                                                     dtype=ptdtype)
-        
-            
+                        
     def _init_config(self, **kwargs):
         """
         Initialize the configuration for the trainer.
@@ -262,7 +220,8 @@ class GramTrainer:
         return dataloader
 
 
-    def _save_model(self, best_val_loss: float = None):
+    def _save_model(self, 
+                    best_val_loss: float = None):
         """
         Save the current state of the model to a checkpoint file.
 
@@ -289,7 +248,7 @@ class GramTrainer:
         os.makedirs(os.path.dirname(file_path), mode=0o755, exist_ok=True)
 
         # The following section is your provided code incorporated into this function:
-        raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
+        raw_model = self.model.module if cfg.ddp.ddp else self.model # unwrap DDP container if needed
 
         checkpoint = {
             'model': raw_model.state_dict(),
@@ -341,7 +300,7 @@ class GramTrainer:
         print(f"Resuming training from {lib_dir}")
 
         # Load the state from the file path
-        checkpoint = torch.load(file_path, map_location=cfg.system.devices)
+        checkpoint = torch.load(file_path, map_location=self.device)
         
         # Update the 'model_args', 'iter_num', 'best_val_loss', and 'config' attributes
         self.model_args = checkpoint['model_args']
@@ -396,8 +355,8 @@ class GramTrainer:
                                      leave=False):
             
             # Move batch tensors to the same device as the model
-            x_batch = x_batch.to(cfg.system.device)
-            y_batch = y_batch.to(cfg.system.device)
+            x_batch = x_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
         
             # Iterate over each accumulation step
             for micro_step in range(cfg.data.gradient_accumulation_steps):
@@ -477,8 +436,8 @@ class GramTrainer:
                                      leave=False):
             
             # Move batch tensors to the same device as the model
-            x_batch = x_batch.to(cfg.system.device)
-            y_batch = y_batch.to(cfg.system.device)
+            x_batch = x_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
 
             # Perform a forward pass through the model and compute the loss
             logits, loss = self.model(x_batch, y_batch)
@@ -508,7 +467,7 @@ class GramTrainer:
         local_iter_num = 0
         # number of iteration in the current epoch
         iter_num = 0
-        raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
+        raw_model = self.model.module if cfg.ddp.ddp else self.model # unwrap DDP container if needed
         running_mfu = -1.0
         
         for iter_num in tqdm(range(cfg.optimizer.max_iters), 
@@ -518,12 +477,11 @@ class GramTrainer:
                              leave=True):
             
             # determine and set the learning rate for this iteration
-            # lr = self.get_lr(iter_num) if cfg.learning_rate.decay_lr \
-            #                                    else cfg.learning_rate.learning_rate
+            lr = cfg.learning_rate.learning_rate
 
             for param_group in self.optimizer.param_groups:
                 # param_group['lr'] = cfg.learning_rate.learning_rate
-                param_group['lr'] = 6e-4
+                param_group['lr'] = lr
                 
             # train for one epoch
             train_loss = self._train(self.train_dataloader)
@@ -561,9 +519,6 @@ class GramTrainer:
                 break
 
             local_iter_num += 1
-
-        if self.ddp:
-            destroy_process_group()
 
     def _log_build_file_path(self):
         """
