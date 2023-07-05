@@ -8,7 +8,6 @@ import wandb
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.nn.parallel import DataParallel
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -38,22 +37,73 @@ class GramTrainer:
         print(f"val_dataloader: {len(self.val_dataloader)} batches")
 
         self._init_config(**kwargs)  # Call _init_config with kwargs
+        self._init_ddp()  # Call _init_ddp
 
-        ptdtype = {'float32': torch.float32, 
-                   'bfloat16': torch.bfloat16, 
-                   'float16': torch.float16
-                   }[cfg.system.dtype]
-        
-        self.ctx = nullcontext() if cfg.system.use_cuda is False \
-                        else torch.amp.autocast(device_type=cfg.system.device.type, 
-                                                dtype=ptdtype)
         self.model = self.init_model()
         self.optimizer = self.init_optimizer()
         self.scaler = self._init_scaler()
 
+        if cfg.system.compile:
+            print("Compiling model... (takes a ~minute)")
+            self.model = torch.compile(self.model)
+
+        # wrap model into DDP container
+        if self.ddp:
+            self.model = DDP(self.model, device_ids=[self.ddp_local_rank])
+
         if cfg.io_metrics.wandb_log and self.master_process:
             wandb.init(project=cfg.io_metrics.wandb_project, 
                        name=cfg.io_metrics.wandb_run_name)
+            
+    def _init_ddp(self):
+        """
+        Initialize distributed data parallel (DDP) training.
+
+        This method initializes DDP training if the number of GPUs specified in the configuration is greater than 1.
+        It first initializes the process group using the 'nccl' backend. It then wraps the model in a DDP container.
+
+        Args:
+            None
+
+        Returns:
+            None
+
+        Raises:
+            None
+        """
+        # If the number of GPUs specified in the configuration is greater than 1, initialize DDP training
+        self.ddp = int(os.environ.get('RANK', -1)) != -1 
+        if self.ddp:
+            init_process_group(backend='nccl')
+            ddp_rank = int(os.environ['RANK'])
+            self.ddp_local_rank = int(os.environ['LOCAL_RANK'])
+            ddp_world_size = int(os.environ['WORLD_SIZE'])
+            self.device = f'cuda:{self.ddp_local_rank}'
+            torch.cuda.set_device(self.device)
+            self.master_process = ddp_rank == 0 # only the master process will log to wandb
+            self.seed_offset = ddp_rank # each process will have a different seed
+            # world_size number of process will be training simultneously, so we can scale
+            # down the desired gradient accumulation iterations per process proportionally
+            assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
+            cfg.data.gradient_accumulation_steps = cfg.data.gradient_accumulation_steps // ddp_world_size
+        else:
+            self.master_process = True
+            self.seed_offset = 0
+            ddp_world_size = 1
+
+        torch.manual_seed(1337 + self.seed_offset)
+        torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+        torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+        
+        ptdtype = {'float32': torch.float32,
+                     'bfloat16': torch.bfloat16,
+                     'float16': torch.float16
+                     }[cfg.system.dtype]
+
+        self.ctx = nullcontext() if cfg.system.use_cuda is False \
+                            else torch.amp.autocast(device_type=cfg.system.device.type,
+                                                    dtype=ptdtype)
+        
             
     def _init_config(self, **kwargs):
         """
@@ -102,13 +152,7 @@ class GramTrainer:
             print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
             model = GPT.from_pretrained(cfg.io_metrics.init_from)
 
-        # If the device type is CUDA, move the model to the appropriate device and initialize DataParallel
-        if cfg.system.use_cuda:
-            print(f"Using CUDA; {torch.cuda.device_count()} devices.")
-            if torch.cuda.device_count() > 1:
-                model = DataParallel(model)
-
-            model = model.to(cfg.system.device)
+        model.to(self.device)
                             
         return model
 
@@ -190,7 +234,7 @@ class GramTrainer:
         # Check if the device type is CUDA and if the scaler is available
         if cfg.system.use_cuda and torch.cuda.amp is not None:
             # Initialize the scaler with the default settings
-            scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+            scaler = torch.cuda.amp.GradScaler(enabled=(cfg.system.dtype == 'float16'))
         else:
             # If the device type is not CUDA or the scaler is not available, return a null context
             scaler = nullcontext()
@@ -459,7 +503,7 @@ class GramTrainer:
         local_iter_num = 0
         # number of iteration in the current epoch
         iter_num = 0
-        raw_model = self.model.module if isinstance(self.model, DataParallel) else self.model
+        raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
         running_mfu = -1.0
         
         for iter_num in tqdm(range(cfg.optimizer.max_iters), 
@@ -469,11 +513,12 @@ class GramTrainer:
                              leave=True):
             
             # determine and set the learning rate for this iteration
-            # lr = self.get_lr(local_iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
+            lr = self.get_lr(iter_num) if cfg.learning_rate.decay_lr \
+                                                else cfg.learning_rate.learning_rate
 
             for param_group in self.optimizer.param_groups:
                 # param_group['lr'] = cfg.learning_rate.learning_rate
-                param_group['lr'] = 6e-4
+                param_group['lr'] = lr
                 
             # train for one epoch
             train_loss = self._train(self.train_dataloader)
@@ -482,7 +527,7 @@ class GramTrainer:
             if iter_num % cfg.io_metrics.eval_interval ==  0 and self.master_process:
                 val_loss = self._eval(self.val_dataloader)
                 tqdm.write(f"epoch {iter_num} train_loss = {train_loss:.5f}, \
-                    val_loss = {val_loss:.5f}, lr = {6e-4:.5f}", end='\r')
+                    val_loss = {val_loss:.5f}, lr = {lr:.5f}", end='\r')
                 
                 # Timing and logging
                 t1 = time.time()
@@ -499,7 +544,7 @@ class GramTrainer:
                         'iter': iter_num,
                         'train_loss': train_loss, 
                         'val_loss': val_loss, 
-                        'lr': 6e-4,
+                        'lr': lr,
                         'mfu': running_mfu * 100, # in percent
                     })
 
@@ -511,6 +556,9 @@ class GramTrainer:
                 break
 
             local_iter_num += 1
+
+        if self.ddp:
+            destroy_process_group()
 
     def _log_build_file_path(self):
         """
