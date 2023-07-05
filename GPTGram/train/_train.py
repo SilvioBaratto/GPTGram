@@ -363,9 +363,14 @@ class GramTrainer:
                                      desc="Training",
                                      leave=False):
             
-            # Move batch tensors to the same device as the model
-            x_batch = x_batch.to(self.device)
-            y_batch = y_batch.to(self.device)
+            # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
+            if torch.cuda.is_available():
+                x_batch = x_batch.pin_memory().to(self.device, non_blocking=True)
+                y_batch = y_batch.pin_memory().to(self.device, non_blocking=True)
+            else:
+                # Move batch tensors to the same device as the model
+                x_batch = x_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
         
             # Iterate over each accumulation step
             for micro_step in range(cfg.data.gradient_accumulation_steps):
@@ -444,9 +449,14 @@ class GramTrainer:
                                      desc="Evaluating", 
                                      leave=False):
             
-            # Move batch tensors to the same device as the model
-            x_batch = x_batch.to(self.device)
-            y_batch = y_batch.to(self.device)
+            # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
+            if torch.cuda.is_available():
+                x_batch = x_batch.pin_memory().to(self.device, non_blocking=True)
+                y_batch = y_batch.pin_memory().to(self.device, non_blocking=True)
+            else:
+                # Move batch tensors to the same device as the model
+                x_batch = x_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
 
             # Perform a forward pass through the model and compute the loss
             logits, loss = self.model(x_batch, y_batch)
