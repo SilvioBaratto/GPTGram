@@ -4,7 +4,8 @@ from GPTGram import GramTrainer
 
 def arg_parser():
     parser = argparse.ArgumentParser(description='GPT Configuration')
-    
+    # Add this line to your arg_parser function
+    parser.add_argument('--local_rank', type=int, default=0, help='Local rank. Necessary for using the torch.distributed.launch utility.')
     parser.add_argument('--block_size', type=int, default=1024, help='Block size')
     parser.add_argument('--vocab_size', type=int, default=50304, help='Vocabulary size')
     parser.add_argument('--n_layer', type=int, default=12, help='Number of layers')

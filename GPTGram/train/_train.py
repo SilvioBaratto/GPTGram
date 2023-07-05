@@ -90,6 +90,7 @@ class GramTrainer:
             self.master_process = True
             self.seed_offset = 0
             ddp_world_size = 1
+            self.device = cfg.system.device
 
         torch.manual_seed(1337 + self.seed_offset)
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
