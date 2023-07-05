@@ -7,7 +7,9 @@ from contextlib import nullcontext
 import wandb
 import numpy as np
 import torch
-from torch.nn.parallel import DataParallel 
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.parallel import DataParallel
+from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from ..config import Config as cfg
@@ -30,6 +32,10 @@ class GramTrainer:
         # create dataloaders
         self.train_dataloader = self.init_dataloader(train_file)
         self.val_dataloader = self.init_dataloader(val_file)
+
+        # print the len and how many batches in the dataloader
+        print(f"train_dataloader: {len(self.train_dataloader)} batches")
+        print(f"val_dataloader: {len(self.val_dataloader)} batches")
 
         self._init_config(**kwargs)  # Call _init_config with kwargs
 
@@ -184,7 +190,7 @@ class GramTrainer:
         # Check if the device type is CUDA and if the scaler is available
         if cfg.system.use_cuda and torch.cuda.amp is not None:
             # Initialize the scaler with the default settings
-            scaler = torch.cuda.amp.GradScaler()
+            scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
         else:
             # If the device type is not CUDA or the scaler is not available, return a null context
             scaler = nullcontext()
@@ -337,7 +343,10 @@ class GramTrainer:
         self.model.train()
 
         # Iterate over all batches in the training data loader
-        for x_batch, y_batch in self.train_dataloader:
+        for x_batch, y_batch in tqdm(self.train_dataloader,
+                                     desc="Training",
+                                     leave=False):
+            
             # Move batch tensors to the same device as the model
             x_batch = x_batch.to(cfg.system.device)
             y_batch = y_batch.to(cfg.system.device)
@@ -414,7 +423,10 @@ class GramTrainer:
         self.model.eval()
 
         # Iterate over all batches in the validation data loader
-        for x_batch, y_batch in val_dl:
+        for x_batch, y_batch in tqdm(val_dl, 
+                                     desc="Evaluating", 
+                                     leave=False):
+            
             # Move batch tensors to the same device as the model
             x_batch = x_batch.to(cfg.system.device)
             y_batch = y_batch.to(cfg.system.device)
