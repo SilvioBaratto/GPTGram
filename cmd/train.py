@@ -47,7 +47,6 @@ def arg_parser():
     parser.add_argument('--backend', type=str, default='nccl', help='DDP backend')
 
     parser.add_argument('--use_cuda', type=bool, default=torch.cuda.is_available(), help='Use CUDA')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device')
     parser.add_argument('--dtype', type=str, default='bfloat16', help='Data type')
     parser.add_argument('--compile', type=bool, default=True, help='Compile')
 
