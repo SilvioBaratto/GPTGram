@@ -18,7 +18,18 @@ class GramTrainer:
 
     def __init__(self, 
                  filepath: str = None,
+                 ddp_rank: int = 0,
+                 ddp_local_rank: int = 0,
+                 ddp_world_size: int = 1,
+                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+                 master_process: bool = True,
                  **kwargs):
+        
+        self.ddp_rank = ddp_rank
+        self.ddp_local_rank = ddp_local_rank
+        self.ddp_world_size = ddp_world_size
+        self.device = device
+        self.master_process = master_process
         
         train_file = os.path.join(filepath, 'train.bin')
         val_file = os.path.join(filepath, 'val.bin')
@@ -36,6 +47,8 @@ class GramTrainer:
         print(f"val_dataloader: {len(self.val_dataloader)} batches")
 
         self._init_config(**kwargs)  # Call _init_config with kwargs
+        assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0, 'gradient_accumulation_steps must be divisible by the number of processes'
+        cfg.data.gradient_accumulation_steps //= ddp_world_size
 
         self.model = self.init_model()
         self.optimizer = self.init_optimizer()
@@ -47,13 +60,9 @@ class GramTrainer:
 
         # wrap model into DDP container
         if cfg.ddp.ddp:
-            self.model = DDP(self.model, 
-                             device_ids=[cfg.ddp.ddp_local_rank],
-                             output_device=cfg.ddp.ddp_local_rank)
-            
-        self.device = cfg.ddp.device if cfg.ddp.ddp else cfg.system.device
-            
-        if cfg.io_metrics.wandb_log and cfg.ddp.master_process:
+            self.model = DDP(self.model, device_ids=[ddp_local_rank])
+                        
+        if cfg.io_metrics.wandb_log and master_process:
             wandb.init(project=cfg.io_metrics.wandb_project, 
                        name=cfg.io_metrics.wandb_run_name)
             
@@ -62,9 +71,9 @@ class GramTrainer:
                      'float16': torch.float16
                      }[cfg.system.dtype]
 
+        device_type = 'cuda' if 'cuda' in self.device else 'cpu' # for later use in torch.autocast
         self.ctx = nullcontext() if cfg.system.use_cuda is False \
-                            else torch.amp.autocast(device_type=cfg.system.device.type,
-                                                    dtype=ptdtype)
+                            else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
                         
     def _init_config(self, **kwargs):
         """
@@ -477,7 +486,7 @@ class GramTrainer:
                              leave=True):
             
             # determine and set the learning rate for this iteration
-            lr = cfg.learning_rate.learning_rate
+            lr = 6e-4
 
             for param_group in self.optimizer.param_groups:
                 # param_group['lr'] = cfg.learning_rate.learning_rate

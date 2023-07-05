@@ -67,21 +67,39 @@ def arg_parser():
 
 if __name__ == '__main__':
 
+    args = arg_parser()
+
     if cfg.ddp.ddp:
-        init_process_group(backend='gloo|nccl')
-        assert cfg.data.gradient_accumulation_steps % cfg.ddp.ddp_world_size == 0, 'gradient_accumulation_steps must be divisible by the number of processes'
-        cfg.data.gradient_accumulation_steps //= cfg.ddp.ddp_world_size
+        init_process_group(backend='nccl')
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(device)
+        master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+        seed_offset = ddp_rank # each process gets a different seed
     
     else:
+        # if not ddp, we are running on a single gpu, and one process
+        master_process = True
         seed_offset = 0
-        cfg.ddp.ddp_world_size = 1
+        ddp_world_size = 1
 
     torch.manual_seed(1337 + seed_offset)
     torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
     torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
     
-    args = arg_parser()
-    trainer = GramTrainer(filepath='../dataset/', **vars(args))
+    if cfg.ddp.ddp:
+        trainer = GramTrainer(filepath='../dataset/',
+                            ddp_rank=ddp_rank,
+                            ddp_local_rank=ddp_local_rank,
+                            ddp_world_size=ddp_world_size,
+                            device=device,
+                            master_process=master_process,
+                            **vars(args))
+    else:
+        trainer = GramTrainer(filepath='../dataset/', **vars(args))
+        
     trainer.train()
 
     if cfg.ddp.ddp:

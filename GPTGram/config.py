@@ -46,7 +46,7 @@ class OptimizerConfig:
 
 @dataclass
 class LearningRateConfig:
-    learning_rate: float = 6e-4
+    learning_rate: float = 6e-4c
     decay_lr: bool = True
     warmup_iters: int = 2000
     lr_decay_iters: int = 600000
@@ -56,11 +56,6 @@ class LearningRateConfig:
 class DDPConfig:
     backend: str = 'nccl'
     ddp: bool = int(os.environ.get('RANK', -1)) != -1
-    ddp_rank: int = int(os.environ['RANK'])
-    ddp_local_rank: int = int(os.environ['LOCAL_RANK'])
-    ddp_world_size: int = int(os.environ['WORLD_SIZE'])
-    device: str = f'cuda:{ddp_local_rank}'
-    master_process: bool = ddp_rank == 0
 
 
 @dataclass
