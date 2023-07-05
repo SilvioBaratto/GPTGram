@@ -49,7 +49,9 @@ class GramTrainer:
 
         # wrap model into DDP container
         if self.ddp:
-            self.model = DDP(self.model, device_ids=[self.ddp_local_rank])
+            self.model = DDP(self.model, 
+                             device_ids=[self.ddp_local_rank],
+                             output_device=self.ddp_local_rank)
 
         if cfg.io_metrics.wandb_log and self.master_process:
             wandb.init(project=cfg.io_metrics.wandb_project, 
@@ -364,7 +366,8 @@ class GramTrainer:
             optimizer.load_state_dict(checkpoint['optimizer'])
 
 
-    def _train(self, train_dl: torch.utils.data.DataLoader) -> float:
+    def _train(self, 
+               train_dl: torch.utils.data.DataLoader) -> float:
         """
         Trains the model on the training data for the specified number of epochs.
 
@@ -446,7 +449,8 @@ class GramTrainer:
         return avg_train_loss
     
     @torch.no_grad()  # Disable gradient computation to save memory
-    def _eval(self, val_dl: torch.utils.data.DataLoader) -> float:
+    def _eval(self, 
+              val_dl: torch.utils.data.DataLoader) -> float:
         """
         Evaluates the model on the validation data.
 
@@ -514,12 +518,12 @@ class GramTrainer:
                              leave=True):
             
             # determine and set the learning rate for this iteration
-            lr = self.get_lr(iter_num) if cfg.learning_rate.decay_lr \
-                                                else cfg.learning_rate.learning_rate
+            # lr = self.get_lr(iter_num) if cfg.learning_rate.decay_lr \
+            #                                    else cfg.learning_rate.learning_rate
 
             for param_group in self.optimizer.param_groups:
                 # param_group['lr'] = cfg.learning_rate.learning_rate
-                param_group['lr'] = lr
+                param_group['lr'] = 6e-4
                 
             # train for one epoch
             train_loss = self._train(self.train_dataloader)
