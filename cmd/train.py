@@ -5,10 +5,13 @@ from torch.distributed import init_process_group, destroy_process_group
 from GPTGram import GramTrainer
 from GPTGram.config import Config as cfg
 
+def ddp_setup():
+    init_process_group(backend='nccl')
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
 def arg_parser():
     parser = argparse.ArgumentParser(description='GPT Configuration')
     # Add this line to your arg_parser function
-    parser.add_argument("--local_rank", type=int, help="Local rank. Necessary for using the torch.distributed.launch utility.")
     parser.add_argument('--block_size', type=int, default=1024, help='Block size')
     parser.add_argument('--vocab_size', type=int, default=50304, help='Vocabulary size')
     parser.add_argument('--n_layer', type=int, default=12, help='Number of layers')
@@ -64,42 +67,14 @@ def arg_parser():
 
     return args
 
+def main(args):
+    ddp_setup()
+    trainer = GramTrainer(filepath='../dataset/', **vars(args))
+    trainer.train()
+    if cfg.ddp.ddp:
+        destroy_process_group()
+
 if __name__ == '__main__':
 
     args = arg_parser()
-
-    if cfg.ddp.ddp:
-        init_process_group(backend='nccl')
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
-        device = f'cuda:{ddp_local_rank}'
-        torch.cuda.set_device(device)
-        master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-        seed_offset = ddp_rank # each process gets a different seed
-    
-    else:
-        # if not ddp, we are running on a single gpu, and one process
-        master_process = True
-        seed_offset = 0
-        ddp_world_size = 1
-
-    torch.manual_seed(1337 + seed_offset)
-    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-    
-    if cfg.ddp.ddp:
-        trainer = GramTrainer(filepath='../dataset/',
-                            ddp_rank=ddp_rank,
-                            ddp_local_rank=ddp_local_rank,
-                            ddp_world_size=ddp_world_size,
-                            device=device,
-                            master_process=master_process,
-                            **vars(args))
-    else:
-        trainer = GramTrainer(filepath='../dataset/', **vars(args))
-        
-    trainer.train()
-
-    if cfg.ddp.ddp:
-        destroy_process_group()
+    main(args)

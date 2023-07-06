@@ -7,8 +7,11 @@ from contextlib import nullcontext
 import wandb
 import numpy as np
 import torch
+from torch.utils.data import Dataset, DataLoader
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.distributed import init_process_group, destroy_process_group
 from tqdm.auto import tqdm
 from ..config import Config as cfg
 from ..preprocessing import GramDataset
@@ -18,22 +21,12 @@ class GramTrainer:
 
     def __init__(self, 
                  filepath: str = None,
-                 ddp_rank: int = 0,
-                 ddp_local_rank: int = 0,
-                 ddp_world_size: int = 1,
-                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-                 master_process: bool = True,
                  **kwargs):
-        
-        self.ddp_rank = ddp_rank
-        self.ddp_local_rank = ddp_local_rank
-        self.ddp_world_size = ddp_world_size
-        self.device = device
-        self.master_process = master_process
         
         train_file = os.path.join(filepath, 'train.bin')
         val_file = os.path.join(filepath, 'val.bin')
 
+        ddp_world_size = int(os.environ.get('WORLD_SIZE', 1))
         # check if train.bin and val.bin exist
         if not os.path.exists(train_file) or not os.path.exists(val_file):
             raise FileNotFoundError('train.bin and/or val.bin not found in the provided filepath.')
@@ -60,9 +53,9 @@ class GramTrainer:
 
         # wrap model into DDP container
         if cfg.ddp.ddp:
-            self.model = DDP(self.model, device_ids=[ddp_local_rank])
+            self.model = DDP(self.model, device_ids=[self.gpu_id])
                         
-        if cfg.io_metrics.wandb_log and master_process:
+        if cfg.io_metrics.wandb_log and self.gpu_id == 0:
             wandb.init(project=cfg.io_metrics.wandb_project, 
                        name=cfg.io_metrics.wandb_run_name)
             
@@ -111,6 +104,7 @@ class GramTrainer:
         """
 
         # Initialize a new instance of the model
+        self.gpu_id = int(os.environ["LOCAL_RANK"])
         model = GPT()
 
         # If specified in the configuration, load a checkpointed model to resume training
@@ -122,8 +116,8 @@ class GramTrainer:
             print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
             model = GPT.from_pretrained(cfg.io_metrics.init_from)
 
-        model.to(self.device)
-                            
+        self.model = model.to(self.gpu_id)    
+
         return model
 
     def init_optimizer(self):
@@ -212,18 +206,14 @@ class GramTrainer:
         return scaler
 
     def init_dataloader(self, filepath: str) -> DataLoader:
-
-        batch_size = cfg.data.batch_size
-        if cfg.system.use_cuda:
-            batch_size *= torch.cuda.device_count()
-
         dataset = GramDataset(filepath)  # Create a dataset instance
 
         dataloader = DataLoader(  # An off-the-shelf class
             dataset,
-            batch_size=batch_size,  # batching is done automatically
-            num_workers=cfg.system.num_workers,
-            pin_memory=cfg.system.use_cuda,   # Pinned memory transfers to GPU quickly
+            batch_size=cfg.data.batch_size,  # batching is done automatically
+            pin_memory = True,
+            shuffle = False,
+            sampler = DistributedSampler(dataset) if cfg.ddp.ddp else None,
         )
 
         return dataloader
@@ -365,12 +355,8 @@ class GramTrainer:
             
             # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
             if torch.cuda.is_available():
-                x_batch = x_batch.pin_memory().to(self.device, non_blocking=True)
-                y_batch = y_batch.pin_memory().to(self.device, non_blocking=True)
-            else:
-                # Move batch tensors to the same device as the model
-                x_batch = x_batch.to(self.device)
-                y_batch = y_batch.to(self.device)
+                x_batch = x_batch.to(self.gpu_id)
+                y_batch = y_batch.to(self.gpu_id)
         
             # Iterate over each accumulation step
             for micro_step in range(cfg.data.gradient_accumulation_steps):
@@ -451,12 +437,8 @@ class GramTrainer:
             
             # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
             if torch.cuda.is_available():
-                x_batch = x_batch.pin_memory().to(self.device, non_blocking=True)
-                y_batch = y_batch.pin_memory().to(self.device, non_blocking=True)
-            else:
-                # Move batch tensors to the same device as the model
-                x_batch = x_batch.to(self.device)
-                y_batch = y_batch.to(self.device)
+                x_batch = x_batch.to(self.gpu_id)
+                y_batch = y_batch.to(self.gpu_id)
 
             # Perform a forward pass through the model and compute the loss
             logits, loss = self.model(x_batch, y_batch)
@@ -506,7 +488,7 @@ class GramTrainer:
             train_loss = self._train(self.train_dataloader)
 
             # evaluate on validation set
-            if iter_num % cfg.io_metrics.eval_interval ==  0 and self.master_process:
+            if iter_num % cfg.io_metrics.eval_interval ==  0 and self.gpu_id == 0:
                 val_loss = self._eval(self.val_dataloader)
                 tqdm.write(f"epoch {iter_num} train_loss = {train_loss:.5f}, \
                     val_loss = {val_loss:.5f}, lr = {lr:.5f}", end='\r')
