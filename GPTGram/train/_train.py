@@ -41,14 +41,14 @@ class GramTrainer:
         if cfg.io_metrics.wandb_log and self.device == 0:
             wandb.init(project=cfg.io_metrics.wandb_project, 
                        name=cfg.io_metrics.wandb_run_name)
-            
+                        
         ptdtype = {'float32': torch.float32,
                      'bfloat16': torch.bfloat16,
                      'float16': torch.float16
                      }[cfg.system.dtype]
 
         self.ctx = nullcontext() if cfg.system.use_cuda is False \
-                            else torch.amp.autocast(device_type='cuda' if 'cuda' in self.device else 'cpu', 
+                            else torch.amp.autocast(device_type='cuda' if 'cuda' in cfg.system.device else 'cpu', 
                                                     dtype=ptdtype)
         
         ddp_world_size = int(os.environ['WORLD_SIZE']) if cfg.ddp.ddp else 1
