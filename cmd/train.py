@@ -33,13 +33,9 @@ class DdpContext:
             5. Enables TensorFloat32 for matmul and CuDNN operations in the CUDA backend.
         """
         init_process_group(backend=cfg.ddp.backend)
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
         torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
         seed_offset = int(os.environ['RANK'])
-        assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
-        cfg.data.gradient_accumulation_steps = cfg.data.gradient_accumulation_steps // ddp_world_size
-
         torch.manual_seed(1337 + seed_offset)
         torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
