@@ -48,7 +48,7 @@ class GramTrainer:
                      }[cfg.system.dtype]
 
         self.ctx = nullcontext() if cfg.system.use_cuda is False \
-                            else torch.amp.autocast(device_type='cuda' if 'cuda' in cfg.system.device else 'cpu', 
+                            else torch.amp.autocast(device_type='cuda' if cfg.system.device.type == 'cuda' else 'cpu', 
                                                     dtype=ptdtype)
         
         ddp_world_size = int(os.environ['WORLD_SIZE']) if cfg.ddp.ddp else 1
