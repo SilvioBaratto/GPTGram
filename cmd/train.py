@@ -5,9 +5,60 @@ from torch.distributed import init_process_group, destroy_process_group
 from GPTGram import GramTrainer
 from GPTGram.config import Config as cfg
 
-def ddp_setup():
-    init_process_group(backend='nccl')
-    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+class DdpContext:
+    def __init__(self, use_ddp):
+        self.use_ddp = use_ddp
+
+    def ddp_setup(self):
+        """
+        Initializes the distributed data parallel (DDP) environment and sets the configuration parameters.
+
+        This function is used to set up the environment for distributed training. It initializes the process 
+        group with a specified backend, sets the CUDA device for the current process, adjusts the 
+        gradient accumulation steps according to the number of processes, and sets a manual seed for random 
+        number generation. It also allows TensorFloat32 (TF32) on matrix multiplication (matmul) and CuDNN 
+        operations.
+
+        The function relies on environment variables set externally, including 'WORLD_SIZE', 'LOCAL_RANK', 
+        and 'RANK'. These are usually set by the utility launching the distributed job.
+
+        Raises:
+            AssertionError: If the gradient accumulation steps is not divisible evenly by the DDP world size.
+
+        Side Effects:
+            1. Initializes the DDP process group with a specific backend.
+            2. Sets the CUDA device for the current process based on the LOCAL_RANK.
+            3. Adjusts the number of gradient accumulation steps according to the DDP world size.
+            4. Sets a random seed for reproducibility.
+            5. Enables TensorFloat32 for matmul and CuDNN operations in the CUDA backend.
+        """
+        init_process_group(backend=cfg.ddp.backend)
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
+        seed_offset = int(os.environ['RANK'])
+        assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
+        cfg.data.gradient_accumulation_steps = cfg.data.gradient_accumulation_steps // ddp_world_size
+
+        torch.manual_seed(1337 + seed_offset)
+        torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
+        torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
+
+    def __enter__(self):
+        if self.use_ddp:
+            self.ddp_setup()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.use_ddp:
+            destroy_process_group()
+
+
+def main(args):
+    with DdpContext(cfg.ddp.ddp) as ddp_context:
+        trainer = GramTrainer(filepath='../dataset/', **vars(args))
+        trainer.train()
+
 
 def arg_parser():
     parser = argparse.ArgumentParser(description='GPT Configuration')
@@ -67,14 +118,6 @@ def arg_parser():
 
     return args
 
-def main(args):
-    ddp_setup()
-    trainer = GramTrainer(filepath='../dataset/', **vars(args))
-    trainer.train()
-    if cfg.ddp.ddp:
-        destroy_process_group()
-
 if __name__ == '__main__':
-
     args = arg_parser()
     main(args)

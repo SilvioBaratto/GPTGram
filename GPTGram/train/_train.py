@@ -11,7 +11,6 @@ from torch.utils.data import Dataset, DataLoader
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
 from tqdm.auto import tqdm
 from ..config import Config as cfg
 from ..preprocessing import GramDataset
@@ -26,7 +25,6 @@ class GramTrainer:
         train_file = os.path.join(filepath, 'train.bin')
         val_file = os.path.join(filepath, 'val.bin')
 
-        ddp_world_size = int(os.environ.get('WORLD_SIZE', 1))
         # check if train.bin and val.bin exist
         if not os.path.exists(train_file) or not os.path.exists(val_file):
             raise FileNotFoundError('train.bin and/or val.bin not found in the provided filepath.')
@@ -35,27 +33,12 @@ class GramTrainer:
         self.train_dataloader = self.init_dataloader(train_file)
         self.val_dataloader = self.init_dataloader(val_file)
 
-        # print the len and how many batches in the dataloader
-        print(f"train_dataloader: {len(self.train_dataloader)} batches")
-        print(f"val_dataloader: {len(self.val_dataloader)} batches")
-
         self._init_config(**kwargs)  # Call _init_config with kwargs
-        assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0, 'gradient_accumulation_steps must be divisible by the number of processes'
-        cfg.data.gradient_accumulation_steps //= ddp_world_size
-
-        self.model = self.init_model()
-        self.optimizer = self.init_optimizer()
-        self.scaler = self._init_scaler()
-
-        if cfg.system.compile:
-            print("Compiling model... (takes a ~minute)")
-            self.model = torch.compile(self.model)
-
-        # wrap model into DDP container
-        if cfg.ddp.ddp:
-            self.model = DDP(self.model, device_ids=[self.gpu_id])
+        self.init_model()
+        self.init_optimizer()
+        self._init_scaler()
                         
-        if cfg.io_metrics.wandb_log and self.gpu_id == 0:
+        if cfg.io_metrics.wandb_log and self.device == 0:
             wandb.init(project=cfg.io_metrics.wandb_project, 
                        name=cfg.io_metrics.wandb_run_name)
             
@@ -64,9 +47,9 @@ class GramTrainer:
                      'float16': torch.float16
                      }[cfg.system.dtype]
 
-        device_type = 'cuda' if 'cuda' in self.device else 'cpu' # for later use in torch.autocast
         self.ctx = nullcontext() if cfg.system.use_cuda is False \
-                            else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+                            else torch.amp.autocast(device_type='cuda' if 'cuda' in self.device else 'cpu', 
+                                                    dtype=ptdtype)
                         
     def _init_config(self, **kwargs):
         """
@@ -104,7 +87,6 @@ class GramTrainer:
         """
 
         # Initialize a new instance of the model
-        self.gpu_id = int(os.environ["LOCAL_RANK"])
         model = GPT()
 
         # If specified in the configuration, load a checkpointed model to resume training
@@ -116,9 +98,20 @@ class GramTrainer:
             print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
             model = GPT.from_pretrained(cfg.io_metrics.init_from)
 
-        self.model = model.to(self.gpu_id)    
+        if cfg.ddp.ddp:
+            self.device = int(os.environ["LOCAL_RANK"])
+        else:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   
 
-        return model
+        # Move the model to the appropriate device
+        self.model = model.to(self.device)
+
+        if cfg.system.compile:
+            self.model = torch.compile(self.model)
+
+        # wrap model into DDP container
+        if cfg.ddp.ddp:
+            self.model = DDP(self.model, device_ids=[self.device])
 
     def init_optimizer(self):
         """
@@ -170,14 +163,13 @@ class GramTrainer:
         extra_args = dict(fused=True) if use_fused else dict()
 
         # Create AdamW optimizer with the given settings
-        optimizer = torch.optim.AdamW(optim_groups, 
+        self.optimizer = torch.optim.AdamW(optim_groups, 
                                       lr=cfg.optimizer.learning_rate, 
                                       betas=cfg.optimizer.betas, 
                                       **extra_args)
 
         print(f"using fused AdamW: {use_fused}")
 
-        return optimizer
     
     def _init_scaler(self):
         """
@@ -203,18 +195,17 @@ class GramTrainer:
             # If the device type is not CUDA or the scaler is not available, return a null context
             scaler = nullcontext()
 
-        return scaler
+        self.scaler = scaler
 
     def init_dataloader(self, filepath: str) -> DataLoader:
         dataset = GramDataset(filepath)  # Create a dataset instance
 
-        dataloader = DataLoader(  # An off-the-shelf class
-            dataset,
-            batch_size=cfg.data.batch_size,  # batching is done automatically
-            pin_memory = True,
-            shuffle = False,
-            sampler = DistributedSampler(dataset) if cfg.ddp.ddp else None,
-        )
+        dataloader = DataLoader(dataset,
+                                batch_size=cfg.data.batch_size,
+                                pin_memory = True,
+                                shuffle = False,
+                                sampler = DistributedSampler(dataset) if cfg.ddp.ddp else None
+                                )
 
         return dataloader
 
@@ -354,9 +345,8 @@ class GramTrainer:
                                      leave=False):
             
             # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
-            if torch.cuda.is_available():
-                x_batch = x_batch.to(self.gpu_id)
-                y_batch = y_batch.to(self.gpu_id)
+            x_batch = x_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
         
             # Iterate over each accumulation step
             for micro_step in range(cfg.data.gradient_accumulation_steps):
@@ -407,7 +397,7 @@ class GramTrainer:
         # Return the average loss for this epoch
         return avg_train_loss
     
-    @torch.no_grad()  # Disable gradient computation to save memory
+    @torch.no_grad()  
     def _eval(self, 
               val_dl: torch.utils.data.DataLoader) -> float:
         """
@@ -436,9 +426,8 @@ class GramTrainer:
                                      leave=False):
             
             # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
-            if torch.cuda.is_available():
-                x_batch = x_batch.to(self.gpu_id)
-                y_batch = y_batch.to(self.gpu_id)
+            x_batch = x_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
 
             # Perform a forward pass through the model and compute the loss
             logits, loss = self.model(x_batch, y_batch)
@@ -454,55 +443,75 @@ class GramTrainer:
 
     def train(self) -> float:
         """
-        Trains the model on the training data for the specified number of epochs.
+        The main function to handle the training process for the model.
 
-        Args:
-            train_dl (torch.utils.data.DataLoader): The training data.
+        This function implements the complete training process including parameter updates, evaluation on the validation set, 
+        timing and logging, adjusting learning rate, and saving the model with the best validation loss.
+
+        It will continue for a number of iterations defined in the configuration.
 
         Returns:
-            train_loss (float): The training loss.
+            float: The best validation loss encountered during training.
+
+        Raises:
+            RuntimeError: If the training loop doesn't settle after a certain number of iterations.
         """
+        
         # Initialize the variable for tracking the training loss
         t0 = time.time()
-        # number of iteration in the lifetime of this process
-        local_iter_num = 0
-        # number of iteration in the current epoch
-        iter_num = 0
-        raw_model = self.model.module if cfg.ddp.ddp else self.model # unwrap DDP container if needed
-        running_mfu = -1.0
-        
-        for iter_num in tqdm(range(cfg.optimizer.max_iters), 
-                             desc="Training", 
-                             unit="iteration",
-                             position=0,
-                             leave=True):
-            
-            # determine and set the learning rate for this iteration
-            lr = 6e-4
 
+        # The number of iterations in the lifetime of this process
+        local_iter_num = 0
+
+        # The number of iterations in the current epoch
+        iter_num = 0
+
+        # Unwrap the DDP container (DistributedDataParallel) if needed to get the raw model
+        raw_model = self.model.module if cfg.ddp.ddp else self.model 
+
+        # Initialize the running memory footprint utility (MFU) as -1.0
+        running_mfu = -1.0
+
+        # Iterate through the defined range for optimization
+        for iter_num in tqdm(range(cfg.optimizer.max_iters), 
+                            desc="Training", 
+                            unit="iteration",
+                            position=0,
+                            leave=True):
+            
+            # Determine and set the learning rate for this iteration
+            lr = cfg.optimizer.learning_rate
+
+            # Update learning rate in all parameter groups
             for param_group in self.optimizer.param_groups:
-                # param_group['lr'] = cfg.learning_rate.learning_rate
                 param_group['lr'] = lr
                 
-            # train for one epoch
+            # Train for one epoch
             train_loss = self._train(self.train_dataloader)
 
-            # evaluate on validation set
-            if iter_num % cfg.io_metrics.eval_interval ==  0 and self.gpu_id == 0:
+            # Evaluate on validation set at regular intervals and on the first device (if multiple devices are used)
+            if iter_num % cfg.io_metrics.eval_interval ==  0 and self.device == 0:
                 val_loss = self._eval(self.val_dataloader)
+
+                # Log training loss, validation loss and learning rate
                 tqdm.write(f"epoch {iter_num} train_loss = {train_loss:.5f}, \
-                    val_loss = {val_loss:.5f}, lr = {lr:.5f}", end='\r')
+                            val_loss = {val_loss:.5f}, lr = {lr:.5f}", end='\r')
                 
-                # Timing and logging
+                # Calculate and log elapsed time for this iteration
                 t1 = time.time()
                 dt = t1 - t0
                 t0 = t1
-                if local_iter_num >= 5: # let the training loop settle a bit
+
+                # Estimation of the memory footprint utility (MFU) after the training loop has settled
+                if local_iter_num >= 5: 
                     mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
                     running_mfu = mfu if running_mfu == -1 else 0.9*running_mfu + 0.1*mfu
-                tqdm.write(f"iter {iter_num}: loss {train_loss:.4f}, \
-                           time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%", end='\r')
                 
+                # Log loss, elapsed time and memory footprint utility (MFU)
+                tqdm.write(f"iter {iter_num}: loss {train_loss:.4f}, \
+                        time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%", end='\r')
+                
+                # Log to Weights & Biases (wandb) if enabled
                 if cfg.io_metrics.wandb_log:
                     wandb.log({
                         'iter': iter_num,
