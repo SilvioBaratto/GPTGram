@@ -50,6 +50,10 @@ class GramTrainer:
         self.ctx = nullcontext() if cfg.system.use_cuda is False \
                             else torch.amp.autocast(device_type='cuda' if 'cuda' in self.device else 'cpu', 
                                                     dtype=ptdtype)
+        
+        ddp_world_size = int(os.environ['WORLD_SIZE']) if cfg.ddp.ddp else 1
+        assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
+        cfg.data.gradient_accumulation_steps = cfg.data.gradient_accumulation_steps // ddp_world_size
                         
     def _init_config(self, **kwargs):
         """
