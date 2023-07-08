@@ -321,8 +321,7 @@ class GramTrainer:
             optimizer.load_state_dict(checkpoint['optimizer'])
 
 
-    def _train(self, 
-               train_dl: torch.utils.data.DataLoader) -> float:
+    def _train(self) -> float:
         """
         Trains the model on the training data for the specified number of epochs.
 
@@ -346,9 +345,7 @@ class GramTrainer:
         self.model.train()
 
         # Iterate over all batches in the training data loader
-        for x_batch, y_batch in tqdm(self.train_dataloader,
-                                     desc="Training",
-                                     leave=False):
+        for x_batch, y_batch in self.train_dataloader:
             
             # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
             x_batch = x_batch.to(self.device)
@@ -393,8 +390,7 @@ class GramTrainer:
         return avg_train_loss
     
     @torch.no_grad()  
-    def _eval(self, 
-              val_dl: torch.utils.data.DataLoader) -> float:
+    def _eval(self) -> float:
         """
         Evaluates the model on the validation data.
 
@@ -416,9 +412,7 @@ class GramTrainer:
         self.model.eval()
 
         # Iterate over all batches in the validation data loader
-        for x_batch, y_batch in tqdm(val_dl, 
-                                     desc="Evaluating", 
-                                     leave=False):
+        for x_batch, y_batch in self.val_dataloader:
             
             # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
             x_batch = x_batch.to(self.device)
@@ -432,7 +426,7 @@ class GramTrainer:
             total_loss += loss.item()
 
         # Compute the average loss over all batches
-        avg_val_loss = total_loss / len(val_dl)
+        avg_val_loss = total_loss / len(self.val_dataloader)
 
         # Return the average loss for the validation data
         return avg_val_loss
@@ -469,14 +463,10 @@ class GramTrainer:
         running_mfu = -1.0
 
         # Iterate through the defined range for optimization
-        for iter_num in tqdm(range(cfg.optimizer.max_iters), 
-                            desc="Training", 
-                            unit="iteration",
-                            position=0,
-                            leave=True):
+        for iter_num in range(cfg.optimizer.max_iters):
             
             # Determine and set the learning rate for this iteration
-            lr = cfg.optimizer.learning_rate
+            lr = self.get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.optimizer.learning_rate
 
             # Update learning rate in all parameter groups
             for param_group in self.optimizer.param_groups:
@@ -486,45 +476,39 @@ class GramTrainer:
             train_loss = self._train(self.train_dataloader)
 
             # Evaluate on validation set at regular intervals and on the first device (if multiple devices are used)
-            if iter_num % cfg.io_metrics.eval_interval ==  0 and self.device == 0:
+            if iter_num % cfg.io_metrics.eval_interval ==  0 and (not cfg.ddp.ddp or self.device == 0):
                 val_loss = self._eval(self.val_dataloader)
+                print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
 
-                # Log training loss, validation loss and learning rate
-                tqdm.write(f"epoch {iter_num} train_loss = {train_loss:.5f}, \
-                            val_loss = {val_loss:.5f}, lr = {lr:.5f}", end='\r')
-                
-                # Calculate and log elapsed time for this iteration
-                t1 = time.time()
-                dt = t1 - t0
-                t0 = t1
-
-                # Estimation of the memory footprint utility (MFU) after the training loop has settled
-                if local_iter_num >= 5: 
-                    mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
-                    running_mfu = mfu if running_mfu == -1 else 0.9*running_mfu + 0.1*mfu
-                
-                # Log loss, elapsed time and memory footprint utility (MFU)
-                tqdm.write(f"iter {iter_num}: loss {train_loss:.4f}, \
-                        time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%", end='\r')
-                
-                # Log to Weights & Biases (wandb) if enabled
                 if cfg.io_metrics.wandb_log:
                     wandb.log({
                         'iter': iter_num,
-                        'train_loss': train_loss, 
-                        'val_loss': val_loss, 
+                        'train_loss': train_loss,
+                        'val_loss': val_loss,
                         'lr': lr,
-                        'mfu': running_mfu * 100, # in percent
+                        'mfu': running_mfu * 100,
                     })
 
-                if val_loss < best_val_loss or cfg.io_metrics.always_save_checkpoint:
-                    best_val_loss = val_loss
-                    self._save_model(best_val_loss)
+                if val_loss < self.best_val_loss or cfg.io_metrics.always_save_checkpoint:
+                    self.best_val_loss = val_loss
+                    self._save_model(self.best_val_loss)           
 
-            if iter_num == 0 and cfg.io_metrics.eval_only:
+            if iter_num and cfg.io_metrics.eval_only:
                 break
 
-            local_iter_num += 1
+            t1 = time.time()
+            dt = t1 - t0
+            t0 = t1
+            if iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
+                # get loss as float. note: this is a CPU-GPU sync point
+                # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
+                lossf = train_loss.item() * cfg.data.gradient_accumulation_steps
+                if local_iter_num >= 5: # let the training loop settle a bit
+                    mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
+                    running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+                print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")   
+
+            local_iter_num += 1 
 
     def _log_build_file_path(self):
         """
@@ -568,7 +552,7 @@ class GramTrainer:
         # learning rate decay scheduler (cosine with warmup)
         # 1) linear warmup for warmup_iters steps
         if it < cfg.learning_rate.warmup_iters:
-            return cfg.learning_rate.learning_rate * it / cfg.learning_rate.warmup_iters
+            return cfg.optimizer.learning_rate * it / cfg.learning_rate.warmup_iters
         # 2) if it > lr_decay_iters, return min learning rate
         if it > cfg.learning_rate.lr_decay_iters:
             return cfg.learning_rate.min_lr
@@ -576,7 +560,7 @@ class GramTrainer:
         decay_ratio = (it - cfg.learning_rate.warmup_iters) / (cfg.learning_rate.lr_decay_iters - cfg.learning_rate.warmup_iters)
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-        return cfg.learning_rate.min_lr + coeff * (cfg.learning_rate.learning_rate - cfg.learning_rate.min_lr)
+        return cfg.learning_rate.min_lr + coeff * (cfg.optimizer.learning_rate - cfg.learning_rate.min_lr)
 
         
 
