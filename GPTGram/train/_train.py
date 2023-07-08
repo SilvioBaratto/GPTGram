@@ -16,45 +16,58 @@ from ..config import Config as cfg
 from ..preprocessing import GramDataset
 from ..model import GPT
 
+def _print_parameter_info(decay_params, nodecay_params):
+    num_decay_params = sum(p.numel() for p in decay_params)
+    num_nodecay_params = sum(p.numel() for p in nodecay_params)
+    print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+    print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+
 class GramTrainer:
+    def __init__(self, filepath: str = None, **kwargs):
+        self._init_paths(filepath)
+        self._check_files_exist()
 
-    def __init__(self, 
-                 filepath: str = None,
-                 **kwargs):
-        
-        train_file = os.path.join(filepath, 'train.bin')
-        val_file = os.path.join(filepath, 'val.bin')
+        self.train_dataloader = self.init_dataloader(self.train_file)
+        self.val_dataloader = self.init_dataloader(self.val_file)
 
-        # check if train.bin and val.bin exist
-        if not os.path.exists(train_file) or not os.path.exists(val_file):
-            raise FileNotFoundError('train.bin and/or val.bin not found in the provided filepath.')
-
-        # create dataloaders
-        self.train_dataloader = self.init_dataloader(train_file)
-        self.val_dataloader = self.init_dataloader(val_file)
-
-        self._init_config(**kwargs)  # Call _init_config with kwargs
+        self._init_config(**kwargs)
         self.init_model()
         self.init_optimizer()
         self._init_scaler()
-                        
-        if cfg.io_metrics.wandb_log and self.device == 0:
-            wandb.init(project=cfg.io_metrics.wandb_project, 
-                       name=cfg.io_metrics.wandb_run_name)
-                        
-        ptdtype = {'float32': torch.float32,
-                     'bfloat16': torch.bfloat16,
-                     'float16': torch.float16
-                     }[cfg.system.dtype]
 
-        self.ctx = nullcontext() if cfg.system.use_cuda is False \
-                            else torch.amp.autocast(device_type='cuda' if cfg.system.device.type == 'cuda' else 'cpu', 
-                                                    dtype=ptdtype)
+        self._init_wandb()
+        self._init_ctx()
+        self._update_gradient_accumulation_steps()
+
+    def _init_paths(self, filepath):
+        self.train_file = os.path.join(filepath, 'train.bin')
+        self.val_file = os.path.join(filepath, 'val.bin')
+
+    def _check_files_exist(self):
+        for file in [self.train_file, self.val_file]:
+            if not os.path.exists(file):
+                raise FileNotFoundError(f'{file} not found.')
+
+    def _init_wandb(self):
+        if cfg.io_metrics.wandb_log and (not cfg.ddp.ddp or self.device == 0):
+            wandb.init(project=cfg.io_metrics.wandb_project,
+                    name=cfg.io_metrics.wandb_run_name)
+
+    def _init_ctx(self):
+        ptdtype = {'float32': torch.float32,
+                   'bfloat16': torch.bfloat16,
+                   'float16': torch.float16}[cfg.system.dtype]
         
-        ddp_world_size = int(os.environ['WORLD_SIZE']) if cfg.ddp.ddp else 1
-        assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
-        cfg.data.gradient_accumulation_steps = cfg.data.gradient_accumulation_steps // ddp_world_size
-                        
+        self.ctx = nullcontext() if cfg.system.use_cuda else torch.amp.autocast(device_type='cuda', 
+                                                                                dtype=ptdtype)
+
+    def _update_gradient_accumulation_steps(self):
+        if cfg.ddp.ddp:
+            ddp_world_size = int(os.environ['WORLD_SIZE'])
+            assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
+            cfg.data.gradient_accumulation_steps //= ddp_world_size
+
+
     def _init_config(self, **kwargs):
         """
         Initialize the configuration for the trainer.
@@ -90,22 +103,18 @@ class GramTrainer:
             model (GPT): The initialized model.
         """
 
+        # Device setup
+        self.device = int(os.environ["LOCAL_RANK"]) if cfg.ddp.ddp \
+                    else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+   
+        # Function mapping for model initialization
+        model_init_func = {
+            'resume': self._load_model,
+            'gpt2': GPT.from_pretrained,
+        }.get(cfg.io_metrics.init_from, GPT)
+
         # Initialize a new instance of the model
-        model = GPT()
-
-        # If specified in the configuration, load a checkpointed model to resume training
-        if cfg.io_metrics.init_from == 'resume':
-            self._load_model(model)
-
-        # Alternatively, if specified in the configuration, initialize the model with pretrained GPT-2 weights
-        elif cfg.io_metrics.init_from.startswith('gpt2'):
-            print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
-            model = GPT.from_pretrained(cfg.io_metrics.init_from)
-
-        if cfg.ddp.ddp:
-            self.device = int(os.environ["LOCAL_RANK"])
-        else:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   
+        model = model_init_func() if cfg.io_metrics.init_from == 'resume' else model_init_func(cfg.io_metrics.init_from)
 
         # Move the model to the appropriate device
         self.model = model.to(self.device)
@@ -140,7 +149,6 @@ class GramTrainer:
             >>> gpt = GPT()
             >>> optimizer = gpt.configure_optimizers(0.01, 0.001, (0.9, 0.999), 'cuda')
         """
-        # Get all parameters of the model that require gradients
         param_dict = {pn: p for pn, p in self.model.named_parameters() if p.requires_grad}
 
         # Group the parameters based on their dimensionality
@@ -153,11 +161,8 @@ class GramTrainer:
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
 
-        # Print the number of decayed and non-decayed parameters
-        num_decay_params = sum(p.numel() for p in decay_params)
-        num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        if cfg.ddp.ddp and self.device == 0 or not cfg.ddp.ddp:
+            _print_parameter_info(decay_params, nodecay_params)
 
         # Check if fused AdamW is available and if the device type is CUDA
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
@@ -168,9 +173,9 @@ class GramTrainer:
 
         # Create AdamW optimizer with the given settings
         self.optimizer = torch.optim.AdamW(optim_groups, 
-                                      lr=cfg.optimizer.learning_rate, 
-                                      betas=cfg.optimizer.betas, 
-                                      **extra_args)
+                                        lr=cfg.optimizer.learning_rate, 
+                                        betas=cfg.optimizer.betas, 
+                                        **extra_args)
 
         print(f"using fused AdamW: {use_fused}")
 
@@ -192,14 +197,8 @@ class GramTrainer:
             >>> scaler = self._init_scaler()
         """
         # Check if the device type is CUDA and if the scaler is available
-        if cfg.system.use_cuda and torch.cuda.amp is not None:
-            # Initialize the scaler with the default settings
-            scaler = torch.cuda.amp.GradScaler(enabled=(cfg.system.dtype == 'float16'))
-        else:
-            # If the device type is not CUDA or the scaler is not available, return a null context
-            scaler = nullcontext()
-
-        self.scaler = scaler
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(cfg.system.dtype == 'float16')) \
+            if cfg.system.use_cuda and torch.cuda.amp is not None else nullcontext()
 
     def init_dataloader(self, filepath: str) -> DataLoader:
         dataset = GramDataset(filepath)  # Create a dataset instance
@@ -356,44 +355,33 @@ class GramTrainer:
             for micro_step in range(cfg.data.gradient_accumulation_steps):
                 # Perform a forward pass through the model, getting the logits and loss
                 # Note: the context manager is used to enable mixed precision training
+                if cfg.ddp.ddp:
+                    # in DDP training we only need to sync gradients at the last micro step.
+                    # the official way to do this is with model.no_sync() context manager, but
+                    # I really dislike that this bloats the code and forces us to repeat code
+                    # looking at the source of that context manager, it just toggles this variable
+                    self.model.require_backward_grad_sync = (micro_step == cfg.data.gradient_accumulation_steps - 1)  
+
                 with self.ctx:
                     logits, loss = self.model(x_batch, y_batch)
+                    loss = loss / cfg.data.gradient_accumulation_steps
 
-                # Scale the loss by the number of gradient accumulation steps
-                scaled_loss = loss / cfg.data.gradient_accumulation_steps
-                # Sum the losses
-                summed_loss = scaled_loss.sum()
+                # Perform a backward pass to calculate gradients
+                self.scaler.scale(loss).backward()
 
-                if cfg.system.use_cuda:
-                    # Perform a backward pass to calculate gradients
-                    self.scaler.scale(summed_loss).backward()
-                else:
-                    # Perform a backward pass to calculate gradients
-                    summed_loss.backward()
+                # clip the gradient
+                if cfg.optimizer.grad_clip != 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
 
-                # If we've reached the end of the accumulation steps, perform a step of the optimizer
-                if (micro_step+1) % cfg.data.gradient_accumulation_steps == 0:
-                    # If a gradient clipping value is set in the configuration, clip the gradients
-                    if cfg.optimizer.grad_clip > 0:
-                        if cfg.system.use_cuda:
-                            # Unscale the gradients before clipping
-                            self.scaler.unscale_(self.optimizer)
-                        # Clip the gradients of the model's parameters
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
-
-                        if cfg.system.use_cuda:
-                            # Perform a step of the optimizer and update the gradient scaler
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                        else:
-                            # Perform a step of the optimizer
-                            self.optimizer.step()
-
-                    # Zero out the gradients to prepare for the next step
-                    self.optimizer.zero_grad(set_to_none=True)
+                # step the optimizer and scaler if training in fp16
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                # flush the gradients
+                self.optimizer.zero_grad(set_to_none=True)
 
                 # Add the scaled loss for this batch to the total loss
-                total_loss += summed_loss.item()
+                total_loss += loss.item()
 
             # Compute the average loss over all batches
             avg_train_loss = total_loss / len(self.train_dataloader)
@@ -434,7 +422,8 @@ class GramTrainer:
             y_batch = y_batch.to(self.device)
 
             # Perform a forward pass through the model and compute the loss
-            logits, loss = self.model(x_batch, y_batch)
+            with self.ctx:
+                logits, loss = self.model(x_batch, y_batch)
 
             # Add the loss for this batch to the total loss
             total_loss += loss.item()
