@@ -102,20 +102,23 @@ class GramTrainer:
         Returns:
             model (GPT): The initialized model.
         """
+        # Initialize a new instance of the model
+        model = GPT()
+
+        # If specified in the configuration, resume training from a checkpoint
+        if cfg.io_metrics.init_from == 'resume':
+            self._load_model(model)
+
+        # Alternatively, If specified in the configuration, initialize from a pretrained model with
+        # pretrained GPT-2 weights
+        elif cfg.io_metrics.init_from.startswith('gpt2'):
+            print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
+            model = GPT.from_pretrained(cfg.io_metrics.init_from)
 
         # Device setup
         self.device = int(os.environ["LOCAL_RANK"]) if cfg.ddp.ddp \
                     else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
    
-        # Function mapping for model initialization
-        model_init_func = {
-            'resume': self._load_model,
-            'gpt2': GPT.from_pretrained,
-        }.get(cfg.io_metrics.init_from, GPT)
-
-        # Initialize a new instance of the model
-        model = model_init_func() if cfg.io_metrics.init_from == 'resume' else model_init_func(cfg.io_metrics.init_from)
-
         # Move the model to the appropriate device
         self.model = model.to(self.device)
 
