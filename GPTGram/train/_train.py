@@ -402,19 +402,8 @@ class GramTrainer:
         # Initialize the variable for tracking the total loss
         total_loss = 0.0
 
-        # Initialize the local iteration number
-        local_iter_num = 0
-
-        # Unwrap the DDP container (DistributedDataParallel) if needed to get the raw model
-        raw_model = self.model.module if cfg.ddp.ddp else self.model
-
-        # Initialize the running memory footprint utility (MFU) as -1.0
-        running_mfu = -1.0
-
         # Set the model to training mode. This enables operations which are only applied during training like dropout
         self.model.train()
-
-        t0 = time.time()
 
         # Iterate over all batches in the training data loader
         for x_batch, y_batch in self.train_dataloader:
@@ -453,25 +442,10 @@ class GramTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
                 # Add the scaled loss for this batch to the total loss
-                total_loss += loss.item()
+                total_loss += loss.item() * cfg.data.gradient_accumulation_steps
 
             # Compute the average loss over all batches
             avg_train_loss = total_loss / len(self.train_dataloader)
-
-            local_iter_num += 1
-
-            # timing and logging
-            t1 = time.time()
-            dt = t1 - t0
-            t0 = t1
-
-            # Log after log_interval
-            if local_iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
-                lossf = avg_train_loss * cfg.data.gradient_accumulation_steps
-                if local_iter_num >= 5:
-                    mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
-                    running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-                print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
 
         # Return the average loss for this epoch
         return avg_train_loss
@@ -543,6 +517,9 @@ class GramTrainer:
         # The number of iterations in the current epoch
         iter_num = 0
 
+        # Unwrap the DDP container (DistributedDataParallel) if needed to get the raw model
+        raw_model = self.model.module if cfg.ddp.ddp else self.model
+
         # The best validation loss encountered so far
         best_val_loss = 1e9
 
@@ -579,7 +556,21 @@ class GramTrainer:
                 if val_loss < best_val_loss or cfg.io_metrics.always_save_checkpoint:
                     best_val_loss = val_loss
                     self._save_model(iter_num,
-                                     best_val_loss)    
+                                     best_val_loss)   
+
+            local_iter_num += 1
+
+            # timing and logging
+            t1 = time.time()
+            dt = t1 - t0
+            t0 = t1
+
+            # Log after log_interval
+            if local_iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
+                if local_iter_num >= 5:
+                    mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
+                    running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+                print(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%") 
 
     def config_to_dict(self):
         """
