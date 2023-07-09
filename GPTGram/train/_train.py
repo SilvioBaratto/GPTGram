@@ -528,13 +528,8 @@ class GramTrainer:
         running_mfu = -1.0
 
         # init progress bar
-        # Create a progress bar instance
-        progress_bar = tqdm(range(cfg.optimizer.max_iters), position=0, leave=True) \
-                        if not cfg.ddp.ddp or self.device == '0' \
-                        else range(cfg.optimizer.max_iters)
 
-        # Iterate through the defined range for optimization
-        for iter_num in progress_bar:
+        for iter_num in tqdm(range(cfg.optimizer.max_iters), position=0, leave=True):
             
             # Determine and set the learning rate for this iteration
             lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
