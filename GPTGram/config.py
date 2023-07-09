@@ -36,7 +36,6 @@ class DataConfig:
 
 @dataclass
 class OptimizerConfig:
-    learning_rate: float = 6e-4
     max_iters: int = 600000
     weight_decay: float = 1e-1
     beta1: float = 0.9
@@ -46,6 +45,7 @@ class OptimizerConfig:
 
 @dataclass
 class LearningRateConfig:
+    learning_rate: float = 6e-4
     decay_lr: bool = True
     warmup_iters: int = 2000
     lr_decay_iters: int = 600000

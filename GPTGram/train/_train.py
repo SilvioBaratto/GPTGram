@@ -46,9 +46,8 @@ def get_lr(it):
         configuration object `cfg.learning_rate`.
     """
     # learning rate decay scheduler (cosine with warmup)
-    # 1) linear warmup for warmup_iters steps
     if it < cfg.learning_rate.warmup_iters:
-        return cfg.optimizer.learning_rate * it / cfg.learning_rate.warmup_iters
+        return cfg.learning_rate.learning_rate * it / cfg.learning_rate.warmup_iters
     # 2) if it > lr_decay_iters, return min learning rate
     if it > cfg.learning_rate.lr_decay_iters:
         return cfg.learning_rate.min_lr
@@ -56,7 +55,7 @@ def get_lr(it):
     decay_ratio = (it - cfg.learning_rate.warmup_iters) / (cfg.learning_rate.lr_decay_iters - cfg.learning_rate.warmup_iters)
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return cfg.learning_rate.min_lr + coeff * (cfg.optimizer.learning_rate - cfg.learning_rate.min_lr)
+    return cfg.learning_rate.min_lr + coeff * (cfg.learning_rate.learning_rate - cfg.learning_rate.min_lr)
 
 class GramTrainer:
     def __init__(self, filepath: str = None, **kwargs):
@@ -123,7 +122,16 @@ class GramTrainer:
         """
         # Update the configuration with any keyword arguments passed to the method
         for key, value in kwargs.items():
-            setattr(cfg, key, value)
+            if hasattr(cfg, key):
+                setattr(cfg, key, value)
+            else:
+                for subconfig in [cfg.gpt, cfg.io_metrics, cfg.data, cfg.optimizer, 
+                                cfg.learning_rate, cfg.ddp, cfg.system, cfg.sampling]:
+                    if hasattr(subconfig, key):
+                        setattr(subconfig, key, value)
+                        break
+                else:  # No break - attribute was not found in any subconfig
+                    raise ValueError(f"Invalid config key: {key}")
 
     def init_model(self):
         """
@@ -502,7 +510,7 @@ class GramTrainer:
         for iter_num in range(cfg.optimizer.max_iters):
             
             # Determine and set the learning rate for this iteration
-            lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.optimizer.learning_rate
+            lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
 
             # Update learning rate in all parameter groups
             for param_group in self.optimizer.param_groups:
