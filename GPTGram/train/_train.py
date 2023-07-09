@@ -155,6 +155,14 @@ class GramTrainer:
         """
         # Initialize a new instance of the model
         model = GPT()
+        self.model_args = dict(n_layer = cfg.gpt.n_layer,
+                               n_head = cfg.gpt.n_head,
+                               n_embd = cfg.gpt.n_embd,
+                               block_size = cfg.gpt.block_size,
+                               bias = cfg.gpt.bias,
+                               vocab_size = cfg.gpt.vocab_size,
+                               dropout = cfg.gpt.dropout
+                               )
 
         # If specified in the configuration, resume training from a checkpoint
         if cfg.io_metrics.init_from == 'resume':
@@ -268,6 +276,7 @@ class GramTrainer:
 
 
     def _save_model(self, 
+                    iter_num: int,
                     best_val_loss: float = None):
         """
         Save the current state of the model to a checkpoint file.
@@ -275,9 +284,8 @@ class GramTrainer:
         Returns:
             None
         """
-
         def build_file_path(file_format: str, *args) -> str:
-            return os.path.join(lib_dir, 'save', file_format.format(*args))
+            return os.path.join(lib_dir, cfg.io_metrics.out_dir, file_format.format(*args))
         
         # Determine the library directory based on the "cfg.io_metrics.folder" attribute
         if cfg.io_metrics.folder is None:
@@ -297,17 +305,17 @@ class GramTrainer:
         # The following section is your provided code incorporated into this function:
         raw_model = self.model.module if cfg.ddp.ddp else self.model # unwrap DDP container if needed
 
-        checkpoint = {
+        state = {
             'model': raw_model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'model_args': self.model_args,
-            'iter_num': self.iter_num,
+            'iter_num': iter_num,
             'best_val_loss': best_val_loss,
-            'config': self.config,
+            'config': self.config_to_dict(cfg)
         }
 
         print(f"saving checkpoint to {lib_dir}")
-        torch.save(checkpoint, file_path)
+        torch.save(state, file_path)
 
 
     def _load_model(self, model, optimizer=None) -> None:
@@ -326,7 +334,7 @@ class GramTrainer:
         """
 
         def build_file_path(file_format: str, *args) -> str:
-            return os.path.join(lib_dir, 'save', file_format.format(*args))
+            return os.path.join(lib_dir, cfg.io_metrics.out_dir, file_format.format(*args))
 
         # Determine the library directory based on the "cfg.io_metrics.folder" attribute
         if cfg.io_metrics.folder is None:
@@ -372,7 +380,8 @@ class GramTrainer:
             optimizer.load_state_dict(checkpoint['optimizer'])
 
 
-    def _train(self) -> float:
+    def _train(self,
+               iter_num: int) -> float:
         """
         Trains the model on the training data for the specified number of epochs.
 
@@ -392,8 +401,20 @@ class GramTrainer:
 
         # Initialize the variable for tracking the total loss
         total_loss = 0.0
+
+        # Initialize the local iteration number
+        local_iter_num = 0
+
+        # Unwrap the DDP container (DistributedDataParallel) if needed to get the raw model
+        raw_model = self.model.module if cfg.ddp.ddp else self.model
+
+        # Initialize the running memory footprint utility (MFU) as -1.0
+        running_mfu = -1.0
+
         # Set the model to training mode. This enables operations which are only applied during training like dropout
         self.model.train()
+
+        t0 = time.time()
 
         # Iterate over all batches in the training data loader
         for x_batch, y_batch in self.train_dataloader:
@@ -433,6 +454,17 @@ class GramTrainer:
 
                 # Add the scaled loss for this batch to the total loss
                 total_loss += loss.item()
+
+                local_iter_num += 1
+
+                # Log after log_interval
+                if local_iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
+                    dt = time.time(0) - t0
+                    lossf = total_loss * cfg.data.gradient_accumulation_steps
+                    if local_iter_num >= 5:
+                        mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
+                        running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+                    print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
 
             # Compute the average loss over all batches
             avg_train_loss = total_loss / len(self.train_dataloader)
@@ -510,9 +542,6 @@ class GramTrainer:
         # The best validation loss encountered so far
         best_val_loss = 1e9
 
-        # Unwrap the DDP container (DistributedDataParallel) if needed to get the raw model
-        raw_model = self.model.module if cfg.ddp.ddp else self.model 
-
         # Initialize the running memory footprint utility (MFU) as -1.0
         running_mfu = -1.0
 
@@ -527,7 +556,7 @@ class GramTrainer:
                 param_group['lr'] = lr
                 
             # Train for one epoch
-            train_loss = self._train()
+            train_loss = self._train(iter_num=iter_num)
 
             # Evaluate on validation set at regular intervals and on the first device (if multiple devices are used)
             if iter_num % cfg.io_metrics.eval_interval ==  0 and (not cfg.ddp.ddp or self.device == 0):
@@ -545,22 +574,25 @@ class GramTrainer:
 
                 if val_loss < best_val_loss or cfg.io_metrics.always_save_checkpoint:
                     best_val_loss = val_loss
-                    self._save_model(best_val_loss)           
+                    self._save_model(iter_num,
+                                     best_val_loss)    
 
-            t1 = time.time()
-            dt = t1 - t0
-            t0 = t1
-
-            if iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
-                # get loss as float. note: this is a CPU-GPU sync point
-                # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-                lossf = train_loss * cfg.data.gradient_accumulation_steps
-                if local_iter_num >= 5: # let the training loop settle a bit
-                    mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
-                    running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-                print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")   
-
-            local_iter_num += 1 
+    def config_to_dict(self):
+        """
+        list all subconfigurations in a dictionary
+        """
+        subconfigs = {
+            **cfg.gpt.__dict__,
+            **cfg.io_metrics.__dict__,
+            **cfg.data.__dict__,
+            **cfg.optimizer.__dict__,
+            **cfg.learning_rate.__dict__,
+            **cfg.ddp.__dict__,
+            **cfg.system.__dict__,
+            **cfg.sampling.__dict__
+        }
+        
+        return subconfigs       
 
     def _log_build_file_path(self):
         """

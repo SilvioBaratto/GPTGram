@@ -29,8 +29,7 @@ class IOMetricsConfig:
     init_from: str = 'scratch'
 @dataclass
 class DataConfig:
-    dataset: str = 'whatsdataset'
-    gradient_accumulation_steps: int = 5 * 8
+    gradient_accumulation_steps: int = 5 * torch.cuda.device_count()
     batch_size: int = 12
     block_size: int = 1024
 
