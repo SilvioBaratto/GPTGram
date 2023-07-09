@@ -443,7 +443,7 @@ class GramTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
                 # Add the scaled loss for this batch to the total loss
-                total_loss += loss.item() 
+                total_loss += loss.item() * cfg.data.gradient_accumulation_steps
 
             # Compute the average loss over all batches
             avg_train_loss = total_loss / len(self.train_dataloader)
@@ -528,8 +528,18 @@ class GramTrainer:
         running_mfu = -1.0
 
         # init progress bar
+        if cfg.ddp.ddp:
+            progress_bars = [tqdm(range(cfg.optimizer.max_iters), position=i, leave=True) for i in range(torch.cuda.device_count())]
+        else:
+            progress_bars = [tqdm(range(cfg.optimizer.max_iters))]
 
-        for iter_num in tqdm(range(cfg.optimizer.max_iters), position=0, leave=True):
+        for iter_num in range(cfg.optimizer.max_iters):
+
+            # Choose a progress bar based on current device
+            progress_bars = [progress_bars[self.device]] if cfg.ddp.ddp else progress_bars
+
+            # Update the progress bar for current device
+            progress_bars.update()
             
             # Determine and set the learning rate for this iteration
             lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
@@ -570,11 +580,10 @@ class GramTrainer:
 
             # Log after log_interval
             if local_iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
-                lossf = train_loss * cfg.data.gradient_accumulation_steps
                 if local_iter_num >= 5:
                     mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
                     running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-                tqdm.write(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%",
+                tqdm.write(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%",
                            end='\n' if cfg.ddp.ddp else '\r')
 
     def config_to_dict(self):
