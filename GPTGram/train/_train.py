@@ -507,6 +507,9 @@ class GramTrainer:
         # The number of iterations in the current epoch
         iter_num = 0
 
+        # The best validation loss encountered so far
+        best_val_loss = 1e9
+
         # Unwrap the DDP container (DistributedDataParallel) if needed to get the raw model
         raw_model = self.model.module if cfg.ddp.ddp else self.model 
 
@@ -540,12 +543,9 @@ class GramTrainer:
                         'mfu': running_mfu * 100,
                     })
 
-                if val_loss < self.best_val_loss or cfg.io_metrics.always_save_checkpoint:
-                    self.best_val_loss = val_loss
-                    self._save_model(self.best_val_loss)           
-
-            if iter_num and cfg.io_metrics.eval_only:
-                break
+                if val_loss < best_val_loss or cfg.io_metrics.always_save_checkpoint:
+                    best_val_loss = val_loss
+                    self._save_model(best_val_loss)           
 
             t1 = time.time()
             dt = t1 - t0
@@ -554,7 +554,7 @@ class GramTrainer:
             if iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
                 # get loss as float. note: this is a CPU-GPU sync point
                 # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-                lossf = train_loss.item() * cfg.data.gradient_accumulation_steps
+                lossf = train_loss * cfg.data.gradient_accumulation_steps
                 if local_iter_num >= 5: # let the training loop settle a bit
                     mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
                     running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu

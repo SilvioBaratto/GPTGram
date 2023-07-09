@@ -17,12 +17,12 @@ class GPTConfig:
 class IOMetricsConfig:
     out_dir: str = 'out'
     eval_interval: int = 2000
-    log_interval: int = 1
+    log_interval: int = 10
     eval_iters: int = 200
     eval_only: bool = False
     always_save_checkpoint: bool = True
     init_from: str = 'scratch'
-    wandb_log: bool = False
+    wandb_log: bool = True
     wandb_project: str = 'owt'
     wandb_run_name: str = 'gpt2'
     folder: str = 'models'
