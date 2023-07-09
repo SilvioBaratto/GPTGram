@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import os
 from ._transformer import LayerNorm, Block
 from ..config import Config as cfg
 
@@ -75,7 +76,8 @@ class GPT(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * cfg.gpt.n_layer))
 
         # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+        if not cfg.ddp.ddp or os.environ.get('RANK', '0') == '0':
+            print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
     def _init_config(self, **kwargs):
         """

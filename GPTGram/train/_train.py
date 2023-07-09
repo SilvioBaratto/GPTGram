@@ -239,7 +239,8 @@ class GramTrainer:
                                         betas=cfg.optimizer.betas, 
                                         **extra_args)
 
-        print(f"using fused AdamW: {use_fused}")
+        if not cfg.ddp.ddp or self.device == '0':
+            print(f"using fused AdamW: {use_fused}")
 
     
     def _init_scaler(self):
@@ -288,10 +289,10 @@ class GramTrainer:
             return os.path.join(lib_dir, cfg.io_metrics.out_dir, file_format.format(*args))
         
         # Determine the library directory based on the "cfg.io_metrics.folder" attribute
-        if cfg.io_metrics.folder is None:
+        if cfg.io_metrics.out_dir is None:
             lib_dir = os.path.dirname(os.path.realpath(__file__)) # Use the current directory
         else:
-            lib_dir = cfg.io_metrics.folder
+            lib_dir = cfg.io_metrics.out_dir
 
         # Get the file path configurations from the '_log_build_file_path' method
         file_path_configs = self._log_build_file_path()
@@ -337,10 +338,10 @@ class GramTrainer:
             return os.path.join(lib_dir, cfg.io_metrics.out_dir, file_format.format(*args))
 
         # Determine the library directory based on the "cfg.io_metrics.folder" attribute
-        if cfg.io_metrics.folder is None:
+        if cfg.io_metrics.out_dir is None:
             lib_dir = os.path.dirname(os.path.realpath(__file__))  
         else:
-            lib_dir = cfg.io_metrics.folder
+            lib_dir = cfg.io_metrics.out_dir
 
         # Get the file path configurations from the '_log_build_file_path' method
         file_path_configs = self._log_build_file_path()
@@ -526,10 +527,14 @@ class GramTrainer:
         # Initialize the running memory footprint utility (MFU) as -1.0
         running_mfu = -1.0
 
+        # init progress bar
+        # Create a progress bar instance
+        progress_bar = tqdm(range(cfg.optimizer.max_iters), position=0, leave=True) \
+                        if not cfg.ddp.ddp or self.device == '0' \
+                        else range(cfg.optimizer.max_iters)
+
         # Iterate through the defined range for optimization
-        for iter_num in tqdm(range(cfg.optimizer.max_iters),
-                             position=0,
-                             leave=True):
+        for iter_num in progress_bar:
             
             # Determine and set the learning rate for this iteration
             lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
