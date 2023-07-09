@@ -286,7 +286,7 @@ class GramTrainer:
             None
         """
         def build_file_path(file_format: str, *args) -> str:
-            return os.path.join(lib_dir, cfg.io_metrics.out_dir, file_format.format(*args))
+            return os.path.join(cfg.io_metrics.out_dir, file_format.format(*args))
         
         # Determine the library directory based on the "cfg.io_metrics.folder" attribute
         if cfg.io_metrics.out_dir is None:
@@ -335,7 +335,7 @@ class GramTrainer:
         """
 
         def build_file_path(file_format: str, *args) -> str:
-            return os.path.join(lib_dir, cfg.io_metrics.out_dir, file_format.format(*args))
+            return os.path.join(cfg.io_metrics.out_dir, file_format.format(*args))
 
         # Determine the library directory based on the "cfg.io_metrics.folder" attribute
         if cfg.io_metrics.out_dir is None:
@@ -527,19 +527,7 @@ class GramTrainer:
         # Initialize the running memory footprint utility (MFU) as -1.0
         running_mfu = -1.0
 
-        # init progress bar
-        if cfg.ddp.ddp:
-            progress_bars = [tqdm(range(cfg.optimizer.max_iters), position=i, leave=True) for i in range(torch.cuda.device_count())]
-        else:
-            progress_bars = [tqdm(range(cfg.optimizer.max_iters))]
-
         for iter_num in range(cfg.optimizer.max_iters):
-
-            # Choose a progress bar based on current device
-            progress_bars = progress_bars[self.device] if cfg.ddp.ddp else progress_bars
-
-            # Update the progress bar for current device
-            progress_bars.update()
             
             # Determine and set the learning rate for this iteration
             lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
