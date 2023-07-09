@@ -526,11 +526,8 @@ class GramTrainer:
         # Initialize the running memory footprint utility (MFU) as -1.0
         running_mfu = -1.0
 
-        # number of samples
-        num_samples = len(self.train_dataloader.dataset)
-
         # Iterate through the defined range for optimization
-        for iter_num in tqdm(range((cfg.optimizer.max_iters / (num_samples / cfg.data.batch_size))),
+        for iter_num in tqdm(range(cfg.optimizer.max_iters),
                              position=0,
                              leave=True):
             
