@@ -122,16 +122,23 @@ class GramTrainer:
         """
         # Update the configuration with any keyword arguments passed to the method
         for key, value in kwargs.items():
-            if hasattr(cfg, key):
-                setattr(cfg, key, value)
-            else:
-                for subconfig in [cfg.gpt, cfg.io_metrics, cfg.data, cfg.optimizer, 
-                                cfg.learning_rate, cfg.ddp, cfg.system, cfg.sampling]:
-                    if hasattr(subconfig, key):
-                        setattr(subconfig, key, value)
-                        break
-                else:  # No break - attribute was not found in any subconfig
-                    raise ValueError(f"Invalid config key: {key}")
+            # list all subconfigurations in a dictionary
+            subconfigs = {
+                "gpt": cfg.gpt,
+                "io_metrics": cfg.io_metrics,
+                "data": cfg.data,
+                "optimizer": cfg.optimizer,
+                "learning_rate": cfg.learning_rate,
+                "ddp": cfg.ddp,
+                "system": cfg.system,
+                "sampling": cfg.sampling
+            }
+            for subconfig_name, subconfig in subconfigs.items():
+                if hasattr(subconfig, key):
+                    setattr(subconfig, key, value)
+                    break
+            else:  # if no break, attribute was not found in any subconfig
+                raise ValueError(f"Invalid config key: {key}")
 
     def init_model(self):
         """
