@@ -442,7 +442,7 @@ class GramTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
                 # Add the scaled loss for this batch to the total loss
-                total_loss += loss.item() * cfg.data.gradient_accumulation_steps
+                total_loss += loss.item() 
 
             # Compute the average loss over all batches
             avg_train_loss = total_loss / len(self.train_dataloader)
@@ -526,8 +526,13 @@ class GramTrainer:
         # Initialize the running memory footprint utility (MFU) as -1.0
         running_mfu = -1.0
 
+        # number of samples
+        num_samples = len(self.train_dataloader.dataset)
+
         # Iterate through the defined range for optimization
-        for iter_num in range(cfg.optimizer.max_iters):
+        for iter_num in tqdm(range((cfg.optimizer.max_iters / (num_samples / cfg.data.batch_size))),
+                             position=0,
+                             leave=True):
             
             # Determine and set the learning rate for this iteration
             lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
@@ -542,7 +547,8 @@ class GramTrainer:
             # Evaluate on validation set at regular intervals and on the first device (if multiple devices are used)
             if iter_num % cfg.io_metrics.eval_interval ==  0 and (not cfg.ddp.ddp or self.device == 0):
                 val_loss = self._eval()
-                print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
+                tqdm.write(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}",
+                           end='\n' if cfg.ddp.ddp else '\r')
 
                 if cfg.io_metrics.wandb_log:
                     wandb.log({
@@ -567,10 +573,12 @@ class GramTrainer:
 
             # Log after log_interval
             if local_iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
+                lossf = train_loss * cfg.data.gradient_accumulation_steps
                 if local_iter_num >= 5:
                     mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
                     running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-                print(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%") 
+                tqdm.write(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%",
+                           end='\n' if cfg.ddp.ddp else '\r')
 
     def config_to_dict(self):
         """

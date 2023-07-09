@@ -16,8 +16,8 @@ class GPTConfig:
 @dataclass
 class IOMetricsConfig:
     out_dir: str = 'out'
-    eval_interval: int = 2000
-    log_interval: int = 10
+    eval_interval: int = 5
+    log_interval: int = 1
     eval_iters: int = 200
     eval_only: bool = False
     always_save_checkpoint: bool = True
@@ -25,17 +25,16 @@ class IOMetricsConfig:
     wandb_log: bool = True
     wandb_project: str = 'owt'
     wandb_run_name: str = 'gpt2'
-    folder: str = 'models'
     init_from: str = 'scratch'
 @dataclass
 class DataConfig:
-    gradient_accumulation_steps: int = 5 * torch.cuda.device_count()
+    gradient_accumulation_steps: int = 5 * torch.cuda.device_count() if torch.cuda.is_available() else 5
     batch_size: int = 12
     block_size: int = 1024
 
 @dataclass
 class OptimizerConfig:
-    max_iters: int = 600000
+    max_iters: int = 50
     weight_decay: float = 1e-1
     beta1: float = 0.9
     beta2: float = 0.95
@@ -46,8 +45,8 @@ class OptimizerConfig:
 class LearningRateConfig:
     learning_rate: float = 6e-4
     decay_lr: bool = True
-    warmup_iters: int = 2000
-    lr_decay_iters: int = 600000
+    warmup_iters: int = int(OptimizerConfig.max_iters * 0.1)  # changed
+    lr_decay_iters: int = int(OptimizerConfig.max_iters * 0.9)  # changed
     min_lr: float = 6e-5
 
 @dataclass
@@ -62,7 +61,7 @@ class SystemConfig:
     device: str = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
     compile: bool = True
-    num_workers: int = 4
+    num_workers: int = os.cpu_count()
 
 @dataclass
 class SamplingConfig:

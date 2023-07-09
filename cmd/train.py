@@ -56,58 +56,64 @@ def main(args):
         trainer.train()
 
 
-def arg_parser():
+def arg_parser(cfg):
     parser = argparse.ArgumentParser(description='GPT Configuration')
-    # Add this line to your arg_parser function
-    parser.add_argument('--block_size', type=int, default=1024, help='Block size')
-    parser.add_argument('--vocab_size', type=int, default=50304, help='Vocabulary size')
-    parser.add_argument('--n_layer', type=int, default=12, help='Number of layers')
-    parser.add_argument('--n_head', type=int, default=12, help='Number of heads')
-    parser.add_argument('--n_embd', type=int, default=768, help='Embedding size')
-    parser.add_argument('--dropout', type=float, default=0.0, help='Dropout rate')
-    parser.add_argument('--bias', type=bool, default=True, help='Use bias in Linears and LayerNorms')
 
-    parser.add_argument('--out_dir', type=str, default='out', help='Output directory')
-    parser.add_argument('--eval_interval', type=int, default=2000, help='Evaluation interval')
-    parser.add_argument('--log_interval', type=int, default=10, help='Logging interval')
-    parser.add_argument('--eval_iters', type=int, default=200, help='Number of iterations for evaluation')
-    parser.add_argument('--eval_only', type=bool, default=False, help='Evaluate only')
-    parser.add_argument('--always_save_checkpoint', type=bool, default=True, help='Always save checkpoint')
-    parser.add_argument('--init_from', type=str, default='scratch', help='Initialize from')
-    parser.add_argument('--wandb_log', type=bool, default=True, help='Use wandb for logging')
-    parser.add_argument('--wandb_project', type=str, default='owt', help='Wandb project name')
-    parser.add_argument('--wandb_run_name', type=str, default='gpt2', help='Wandb run name')
+    # GPT Config
+    parser.add_argument('--block_size', type=int, default=cfg.gpt.block_size, help='Block size')
+    parser.add_argument('--vocab_size', type=int, default=cfg.gpt.vocab_size, help='Vocabulary size')
+    parser.add_argument('--n_layer', type=int, default=cfg.gpt.n_layer, help='Number of layers')
+    parser.add_argument('--n_head', type=int, default=cfg.gpt.n_head, help='Number of heads')
+    parser.add_argument('--n_embd', type=int, default=cfg.gpt.n_embd, help='Embedding size')
+    parser.add_argument('--dropout', type=float, default=cfg.gpt.dropout, help='Dropout rate')
+    parser.add_argument('--bias', type=bool, default=cfg.gpt.bias, help='Use bias in Linears and LayerNorms')
 
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=40, help='Gradient accumulation steps')
-    parser.add_argument('--batch_size', type=int, default=12, help='Batch size')
+    # IOMetrics Config
+    parser.add_argument('--out_dir', type=str, default=cfg.io_metrics.out_dir, help='Output directory')
+    parser.add_argument('--eval_interval', type=int, default=cfg.io_metrics.eval_interval, help='Evaluation interval')
+    parser.add_argument('--log_interval', type=int, default=cfg.io_metrics.log_interval, help='Logging interval')
+    parser.add_argument('--eval_iters', type=int, default=cfg.io_metrics.eval_iters, help='Number of iterations for evaluation')
+    parser.add_argument('--eval_only', type=bool, default=cfg.io_metrics.eval_only, help='Evaluate only')
+    parser.add_argument('--always_save_checkpoint', type=bool, default=cfg.io_metrics.always_save_checkpoint, help='Always save checkpoint')
+    parser.add_argument('--init_from', type=str, default=cfg.io_metrics.init_from, help='Initialize from')
+    parser.add_argument('--wandb_log', type=bool, default=cfg.io_metrics.wandb_log, help='Use wandb for logging')
+    parser.add_argument('--wandb_project', type=str, default=cfg.io_metrics.wandb_project, help='Wandb project name')
+    parser.add_argument('--wandb_run_name', type=str, default=cfg.io_metrics.wandb_run_name, help='Wandb run name')
 
-    parser.add_argument('--learning_rate', type=float, default=6e-4, help='Learning rate')
-    parser.add_argument('--max_iters', type=int, default=600000, help='Maximum iterations')
-    parser.add_argument('--weight_decay', type=float, default=1e-1, help='Weight decay')
-    parser.add_argument('--beta1', type=float, default=0.9, help='Beta 1')
-    parser.add_argument('--beta2', type=float, default=0.95, help='Beta 2')
-    parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clip')
+    # Data Config
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=cfg.data.gradient_accumulation_steps, help='Gradient accumulation steps')
+    parser.add_argument('--batch_size', type=int, default=cfg.data.batch_size, help='Batch size')
 
-    parser.add_argument('--decay_lr', type=bool, default=True, help='Decay learning rate')
-    parser.add_argument('--warmup_iters', type=int, default=2000, help='Warmup iterations')
-    parser.add_argument('--lr_decay_iters', type=int, default=600000, help='Learning rate decay iterations')
-    parser.add_argument('--min_lr', type=float, default=6e-5, help='Minimum learning rate')
+    # Optimizer Config
+    parser.add_argument('--max_iters', type=int, default=cfg.optimizer.max_iters, help='Maximum iterations')
+    parser.add_argument('--weight_decay', type=float, default=cfg.optimizer.weight_decay, help='Weight decay')
+    parser.add_argument('--beta1', type=float, default=cfg.optimizer.beta1, help='Beta 1')
+    parser.add_argument('--beta2', type=float, default=cfg.optimizer.beta2, help='Beta 2')
+    parser.add_argument('--grad_clip', type=float, default=cfg.optimizer.grad_clip, help='Gradient clip')
 
-    parser.add_argument('--backend', type=str, default='nccl', help='DDP backend')
+    # Learning Rate Config
+    parser.add_argument('--learning_rate', type=float, default=cfg.learning_rate.learning_rate, help='Learning rate')
+    parser.add_argument('--decay_lr', type=bool, default=cfg.learning_rate.decay_lr, help='Decay learning rate')
+    parser.add_argument('--warmup_iters', type=int, default=cfg.learning_rate.warmup_iters, help='Warmup iterations')
+    parser.add_argument('--lr_decay_iters', type=int, default=cfg.learning_rate.lr_decay_iters, help='Learning rate decay iterations')
+    parser.add_argument('--min_lr', type=float, default=cfg.learning_rate.min_lr, help='Minimum learning rate')
 
-    parser.add_argument('--use_cuda', type=bool, default=torch.cuda.is_available(), help='Use CUDA')
-    parser.add_argument('--dtype', type=str, default='bfloat16', help='Data type')
-    parser.add_argument('--compile', type=bool, default=True, help='Compile')
+    # DDP Config
+    parser.add_argument('--backend', type=str, default=cfg.ddp.backend, help='DDP backend')
 
-    parser.add_argument('--start', type=str, default='\n', help='Start token')
-    parser.add_argument('--num_samples', type=int, default=10, help='Number of samples')
-    parser.add_argument('--max_new_tokens', type=int, default=500, help='Maximum new tokens')
-    parser.add_argument('--temperature', type=float, default=0.8, help='Temperature')
-    parser.add_argument('--top_k', type=int, default=200, help='Top k')
-    parser.add_argument('--seed', type=int, default=1337, help='Seed')
+    # System Config
+    parser.add_argument('--use_cuda', type=bool, default=cfg.system.use_cuda, help='Use CUDA')
+    parser.add_argument('--dtype', type=str, default=cfg.system.dtype, help='Data type')
+    parser.add_argument('--compile', type=bool, default=cfg.system.compile, help='Compile')
+    parser.add_argument('--num_workers', type=int, default=cfg.system.num_workers, help='Number of workers')
 
-    parser.add_argument('--folder', type=str, default='models', help='Folder for models')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers')
+    # Sampling Config
+    parser.add_argument('--start', type=str, default=cfg.sampling.start, help='Start token')
+    parser.add_argument('--num_samples', type=int, default=cfg.sampling.num_samples, help='Number of samples')
+    parser.add_argument('--max_new_tokens', type=int, default=cfg.sampling.max_new_tokens, help='Maximum new tokens')
+    parser.add_argument('--temperature', type=float, default=cfg.sampling.temperature, help='Temperature')
+    parser.add_argument('--top_k', type=int, default=cfg.sampling.top_k, help='Top k')
+    parser.add_argument('--seed', type=int, default=cfg.sampling.seed, help='Seed')
 
     args = parser.parse_args()
 
