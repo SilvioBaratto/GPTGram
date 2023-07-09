@@ -455,23 +455,23 @@ class GramTrainer:
                 # Add the scaled loss for this batch to the total loss
                 total_loss += loss.item()
 
-                local_iter_num += 1
-
-                # timing and logging
-                t1 = time.time()
-                dt = t1 - t0
-                t0 = t1
-
-                # Log after log_interval
-                if local_iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
-                    lossf = total_loss * cfg.data.gradient_accumulation_steps
-                    if local_iter_num >= 5:
-                        mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
-                        running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-                    print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
-
             # Compute the average loss over all batches
             avg_train_loss = total_loss / len(self.train_dataloader)
+
+            local_iter_num += 1
+
+            # timing and logging
+            t1 = time.time()
+            dt = t1 - t0
+            t0 = t1
+
+            # Log after log_interval
+            if local_iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
+                lossf = avg_train_loss * cfg.data.gradient_accumulation_steps
+                if local_iter_num >= 5:
+                    mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
+                    running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
+                print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
 
         # Return the average loss for this epoch
         return avg_train_loss
