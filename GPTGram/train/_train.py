@@ -227,7 +227,7 @@ class GramTrainer:
 
         # Create AdamW optimizer with the given settings
         self.optimizer = torch.optim.AdamW(optim_groups, 
-                                        lr=cfg.optimizer.learning_rate, 
+                                        lr=cfg.learning_rate.learning_rate, 
                                         betas=cfg.optimizer.betas, 
                                         **extra_args)
 
