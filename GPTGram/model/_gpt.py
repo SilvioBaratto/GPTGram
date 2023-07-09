@@ -2,7 +2,6 @@ import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import _transformer
 from ._transformer import LayerNorm, Block
 from ..config import Config as cfg
 
