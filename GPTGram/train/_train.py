@@ -457,9 +457,13 @@ class GramTrainer:
 
                 local_iter_num += 1
 
+                # timing and logging
+                t1 = time.time()
+                dt = t1 - t0
+                t0 = t1
+
                 # Log after log_interval
                 if local_iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
-                    dt = time.time(0) - t0
                     lossf = total_loss * cfg.data.gradient_accumulation_steps
                     if local_iter_num >= 5:
                         mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
