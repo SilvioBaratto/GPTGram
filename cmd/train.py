@@ -78,7 +78,6 @@ def arg_parser():
     parser.add_argument('--wandb_project', type=str, default='owt', help='Wandb project name')
     parser.add_argument('--wandb_run_name', type=str, default='gpt2', help='Wandb run name')
 
-    parser.add_argument('--dataset', type=str, default='whatsdataset', help='Dataset name')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=40, help='Gradient accumulation steps')
     parser.add_argument('--batch_size', type=int, default=12, help='Batch size')
 
