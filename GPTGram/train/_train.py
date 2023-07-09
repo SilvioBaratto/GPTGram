@@ -22,6 +22,42 @@ def _print_parameter_info(decay_params, nodecay_params):
     print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
     print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
 
+
+def get_lr(it):
+    """
+    Compute the learning rate for the current training iteration using a cosine decay with warmup schedule.
+
+    The learning rate schedule consists of three phases:
+    1) Linear warmup for a number of steps specified by `cfg.learning_rate.warmup_iters`.
+    2) Cosine decay until `cfg.learning_rate.lr_decay_iters` steps.
+    3) Constant learning rate equal to `cfg.learning_rate.min_lr` after `cfg.learning_rate.lr_decay_iters` steps.
+
+    Args:
+        it (int): The current training iteration.
+
+    Returns:
+        float: The learning rate for the current training iteration.
+
+    Raises:
+        AssertionError: If the decay ratio is not in the range [0, 1].
+
+    Note:
+        The learning rate, warmup steps, decay steps, and minimum learning rate are all specified in the
+        configuration object `cfg.learning_rate`.
+    """
+    # learning rate decay scheduler (cosine with warmup)
+    # 1) linear warmup for warmup_iters steps
+    if it < cfg.learning_rate.warmup_iters:
+        return cfg.optimizer.learning_rate * it / cfg.learning_rate.warmup_iters
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > cfg.learning_rate.lr_decay_iters:
+        return cfg.learning_rate.min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - cfg.learning_rate.warmup_iters) / (cfg.learning_rate.lr_decay_iters - cfg.learning_rate.warmup_iters)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
+    return cfg.learning_rate.min_lr + coeff * (cfg.optimizer.learning_rate - cfg.learning_rate.min_lr)
+
 class GramTrainer:
     def __init__(self, filepath: str = None, **kwargs):
         self._init_paths(filepath)
@@ -466,18 +502,18 @@ class GramTrainer:
         for iter_num in range(cfg.optimizer.max_iters):
             
             # Determine and set the learning rate for this iteration
-            lr = self.get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.optimizer.learning_rate
+            lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.optimizer.learning_rate
 
             # Update learning rate in all parameter groups
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
                 
             # Train for one epoch
-            train_loss = self._train(self.train_dataloader)
+            train_loss = self._train()
 
             # Evaluate on validation set at regular intervals and on the first device (if multiple devices are used)
             if iter_num % cfg.io_metrics.eval_interval ==  0 and (not cfg.ddp.ddp or self.device == 0):
-                val_loss = self._eval(self.val_dataloader)
+                val_loss = self._eval()
                 print(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
 
                 if cfg.io_metrics.wandb_log:
@@ -499,6 +535,7 @@ class GramTrainer:
             t1 = time.time()
             dt = t1 - t0
             t0 = t1
+
             if iter_num % cfg.io_metrics.log_interval == 0 and (not cfg.ddp.ddp or self.device == 0):
                 # get loss as float. note: this is a CPU-GPU sync point
                 # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
@@ -525,42 +562,6 @@ class GramTrainer:
         }
 
         return file_path_configs
-
-    @staticmethod
-    def get_lr(it):
-        """
-        Compute the learning rate for the current training iteration using a cosine decay with warmup schedule.
-
-        The learning rate schedule consists of three phases:
-        1) Linear warmup for a number of steps specified by `cfg.learning_rate.warmup_iters`.
-        2) Cosine decay until `cfg.learning_rate.lr_decay_iters` steps.
-        3) Constant learning rate equal to `cfg.learning_rate.min_lr` after `cfg.learning_rate.lr_decay_iters` steps.
-
-        Args:
-            it (int): The current training iteration.
-
-        Returns:
-            float: The learning rate for the current training iteration.
-
-        Raises:
-            AssertionError: If the decay ratio is not in the range [0, 1].
-
-        Note:
-            The learning rate, warmup steps, decay steps, and minimum learning rate are all specified in the
-            configuration object `cfg.learning_rate`.
-        """
-        # learning rate decay scheduler (cosine with warmup)
-        # 1) linear warmup for warmup_iters steps
-        if it < cfg.learning_rate.warmup_iters:
-            return cfg.optimizer.learning_rate * it / cfg.learning_rate.warmup_iters
-        # 2) if it > lr_decay_iters, return min learning rate
-        if it > cfg.learning_rate.lr_decay_iters:
-            return cfg.learning_rate.min_lr
-        # 3) in between, use cosine decay down to min learning rate
-        decay_ratio = (it - cfg.learning_rate.warmup_iters) / (cfg.learning_rate.lr_decay_iters - cfg.learning_rate.warmup_iters)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-        return cfg.learning_rate.min_lr + coeff * (cfg.optimizer.learning_rate - cfg.learning_rate.min_lr)
 
         
 
