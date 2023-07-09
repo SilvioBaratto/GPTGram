@@ -56,7 +56,7 @@ def main(args):
         trainer.train()
 
 
-def arg_parser(cfg):
+def arg_parser():
     parser = argparse.ArgumentParser(description='GPT Configuration')
 
     # GPT Config
