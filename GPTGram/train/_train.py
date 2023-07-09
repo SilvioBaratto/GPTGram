@@ -536,7 +536,7 @@ class GramTrainer:
         for iter_num in range(cfg.optimizer.max_iters):
 
             # Choose a progress bar based on current device
-            progress_bars = [progress_bars[self.device]] if cfg.ddp.ddp else progress_bars
+            progress_bars = progress_bars[self.device] if cfg.ddp.ddp else progress_bars
 
             # Update the progress bar for current device
             progress_bars.update()
