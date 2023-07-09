@@ -69,12 +69,12 @@ def arg_parser():
 
     parser.add_argument('--out_dir', type=str, default='out', help='Output directory')
     parser.add_argument('--eval_interval', type=int, default=2000, help='Evaluation interval')
-    parser.add_argument('--log_interval', type=int, default=1, help='Logging interval')
+    parser.add_argument('--log_interval', type=int, default=10, help='Logging interval')
     parser.add_argument('--eval_iters', type=int, default=200, help='Number of iterations for evaluation')
     parser.add_argument('--eval_only', type=bool, default=False, help='Evaluate only')
     parser.add_argument('--always_save_checkpoint', type=bool, default=True, help='Always save checkpoint')
     parser.add_argument('--init_from', type=str, default='scratch', help='Initialize from')
-    parser.add_argument('--wandb_log', type=bool, default=False, help='Use wandb for logging')
+    parser.add_argument('--wandb_log', type=bool, default=True, help='Use wandb for logging')
     parser.add_argument('--wandb_project', type=str, default='owt', help='Wandb project name')
     parser.add_argument('--wandb_run_name', type=str, default='gpt2', help='Wandb run name')
 
