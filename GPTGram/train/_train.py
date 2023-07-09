@@ -311,7 +311,7 @@ class GramTrainer:
             'model_args': self.model_args,
             'iter_num': iter_num,
             'best_val_loss': best_val_loss,
-            'config': self.config_to_dict(cfg)
+            'config': self.config_to_dict()
         }
 
         print(f"saving checkpoint to {lib_dir}")
