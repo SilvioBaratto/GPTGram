@@ -16,6 +16,11 @@ read time_needed
 echo "Please enter the partition to use:"
 read partition
 
+# Ask the user for the wandb API key
+echo "Please enter your Weights & Biases API key:"
+read wandb_api_key
+export WANDB_API_KEY=$wandb_api_key
+
 # Check if the inputs are valid
 if ! [[ "$ngpus" =~ ^[0-9]+$ ]] || ! [[ "$ncpus" =~ ^[0-9]+$ ]] || ! [[ "$time_needed" =~ ^([0-9]+):([0-5][0-9]):([0-5][0-9])$ ]] || [[ -z "$partition" ]]
 then
@@ -37,6 +42,9 @@ cat << EOF > $jobscript
 #SBATCH --gpus=$ngpus
 #SBATCH --cpus-per-task=$ncpus
 #SBATCH --time=$time_needed
+
+# Set the wandb API key
+export WANDB_API_KEY=$wandb_api_key
 
 # Train the model
 srun torchrun --standalone --nproc_per_node=$ngpus ../cmd/train.py
