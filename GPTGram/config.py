@@ -26,6 +26,8 @@ class IOMetricsConfig:
     wandb_project: str = 'owt'
     wandb_run_name: str = 'gpt2'
     init_from: str = 'scratch'
+    folder: str = '../dataset/'
+    wandb_api_key: str = os.getenv('WANDB_API_KEY')
 @dataclass
 class DataConfig:
     gradient_accumulation_steps: int = 5 * torch.cuda.device_count() if torch.cuda.is_available() else 5

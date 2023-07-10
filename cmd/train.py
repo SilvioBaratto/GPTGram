@@ -52,7 +52,7 @@ class DdpContext:
 
 def main(args):
     with DdpContext(cfg.ddp.ddp) as ddp_context:
-        trainer = GramTrainer(filepath='../dataset/', **vars(args))
+        trainer = GramTrainer(filepath=cfg.io_metrics.folder, **vars(args))
         trainer.train()
 
 
@@ -79,6 +79,8 @@ def arg_parser():
     parser.add_argument('--wandb_log', type=bool, default=cfg.io_metrics.wandb_log, help='Use wandb for logging')
     parser.add_argument('--wandb_project', type=str, default=cfg.io_metrics.wandb_project, help='Wandb project name')
     parser.add_argument('--wandb_run_name', type=str, default=cfg.io_metrics.wandb_run_name, help='Wandb run name')
+    parser.add_argument('--folder', type=str, default=cfg.io_metrics.folder, help='Name')
+    parser.add_argument('--wandb_api_key', type=str, default=cfg.io_metrics.wandb_api_key, help='Wandb API key')
 
     # Data Config
     parser.add_argument('--gradient_accumulation_steps', type=int, default=cfg.data.gradient_accumulation_steps, help='Gradient accumulation steps')
