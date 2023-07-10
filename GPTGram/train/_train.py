@@ -400,53 +400,51 @@ class GramTrainer:
 
         """
 
-        # Initialize the variable for tracking the total loss
-        total_loss = 0.0
-
         # Set the model to training mode. This enables operations which are only applied during training like dropout
         self.model.train()
 
-        # Iterate over all batches in the training data loader
-        for x_batch, y_batch in self.train_dataloader:
-            
-            # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
-            x_batch = x_batch.to(self.device)
-            y_batch = y_batch.to(self.device)
-        
-            # Iterate over each accumulation step
-            for micro_step in range(cfg.data.gradient_accumulation_steps):
+        # Iterate over each accumulation step
+        for micro_step in range(cfg.data.gradient_accumulation_steps):
+            # Initialize the variable for tracking the total loss
+            total_loss = 0.0
+
+            # Iterate over all batches in the training data loader
+            for x_batch, y_batch in self.train_dataloader:
+                # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
+                x_batch = x_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
+
                 # Perform a forward pass through the model, getting the logits and loss
                 # Note: the context manager is used to enable mixed precision training
-                if cfg.ddp.ddp:
-                    # in DDP training we only need to sync gradients at the last micro step.
-                    # the official way to do this is with model.no_sync() context manager, but
-                    # I really dislike that this bloats the code and forces us to repeat code
-                    # looking at the source of that context manager, it just toggles this variable
-                    self.model.require_backward_grad_sync = (micro_step == cfg.data.gradient_accumulation_steps - 1)  
-
                 with self.ctx:
                     logits, loss = self.model(x_batch, y_batch)
-                    loss = loss / cfg.data.gradient_accumulation_steps
 
-                # Perform a backward pass to calculate gradients
+                # Scale the loss and perform a backward pass to calculate gradients
                 self.scaler.scale(loss).backward()
 
-                # clip the gradient
-                if cfg.optimizer.grad_clip != 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
+                # Add the unscaled loss for this batch to the total loss
+                total_loss += loss.item()
 
-                # step the optimizer and scaler if training in fp16
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                # flush the gradients
-                self.optimizer.zero_grad(set_to_none=True)
+            # Average the total loss by the number of gradient accumulation steps
+            total_loss /= cfg.data.gradient_accumulation_steps
 
-                # Add the scaled loss for this batch to the total loss
-                total_loss += loss.item() * cfg.data.gradient_accumulation_steps
+            if cfg.ddp.ddp:
+                # in DDP training we only need to sync gradients at the last micro step.
+                self.model.require_backward_grad_sync = (micro_step == cfg.data.gradient_accumulation_steps - 1)
 
-            # Compute the average loss over all batches
-            avg_train_loss = total_loss / len(self.train_dataloader)
+            # Clip the gradient and step the optimizer and scaler if training in fp16
+            if cfg.optimizer.grad_clip != 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            # Zero the gradients
+            self.optimizer.zero_grad(set_to_none=True)
+
+        # Compute the average loss over all batches
+        avg_train_loss = total_loss / len(self.train_dataloader)
 
         # Return the average loss for this epoch
         return avg_train_loss
