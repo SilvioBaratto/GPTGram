@@ -84,10 +84,15 @@ class GramTrainer:
                 raise FileNotFoundError(f'{file} not found.')
 
     def _init_wandb(self):
-        wandb.login(key=cfg.io_metrics.wandb_api_key)
-        if cfg.io_metrics.wandb_log and (not cfg.ddp.ddp or self.device == 0):
-            wandb.init(project=cfg.io_metrics.wandb_project,
-                    name=cfg.io_metrics.wandb_run_name)
+        if cfg.ddp.ddp:
+            if torch.distributed.get_rank() == 0:
+                wandb.login(key=cfg.io_metrics.wandb_api_key)
+                if cfg.io_metrics.wandb_log:
+                    wandb.init(project=cfg.io_metrics.wandb_project, name=cfg.io_metrics.wandb_run_name)
+        else:
+            wandb.login(key=cfg.io_metrics.wandb_api_key)
+            if cfg.io_metrics.wandb_log:
+                wandb.init(project=cfg.io_metrics.wandb_project, name=cfg.io_metrics.wandb_run_name)
 
     def _init_ctx(self):
         ptdtype = {'float32': torch.float32,
