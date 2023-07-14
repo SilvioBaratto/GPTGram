@@ -18,16 +18,14 @@ class IOMetricsConfig:
     out_dir: str = 'out'
     eval_interval: int = 5
     log_interval: int = 1
-    eval_iters: int = 200
+    eval_iters: int = 500
     eval_only: bool = False
     always_save_checkpoint: bool = True
     init_from: str = 'scratch'
-    wandb_log: bool = True
-    wandb_project: str = 'owt'
-    wandb_run_name: str = 'gpt2'
-    init_from: str = 'scratch'
+    log: bool = True
+    run_name: str = 'gpt2'
     folder: str = '../dataset/'
-    wandb_api_key: str = os.getenv('WANDB_API_KEY')
+
 @dataclass
 class DataConfig:
     gradient_accumulation_steps: int = 5 * torch.cuda.device_count() if torch.cuda.is_available() else 5
@@ -63,7 +61,7 @@ class SystemConfig:
     device: str = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
     compile: bool = True
-    num_workers: int = os.cpu_count()
+    num_workers: int = int(os.environ['SLURM_CPUS_PER_TASK']) if 'SLURM_CPUS_PER_TASK' in os.environ else 4
 
 @dataclass
 class SamplingConfig:

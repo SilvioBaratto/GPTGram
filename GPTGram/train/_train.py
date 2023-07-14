@@ -1,10 +1,8 @@
 import os
 import time
 import math
-import pickle
 import inspect
 from contextlib import nullcontext
-import wandb
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -15,6 +13,29 @@ from tqdm.auto import tqdm
 from ..config import Config as cfg
 from ..preprocessing import GramDataset
 from ..model import GPT
+import csv
+
+def log_to_csv(filename: str, log_data: dict):
+    """
+    Logs given data to a CSV file.
+
+    Parameters:
+        filename (str): The name of the file to write to.
+        log_data (dict): The data to write to the file.
+    """
+
+    # If the file does not exist, create it and write the header
+    if not os.path.isfile(filename):
+        with open(filename, 'w', newline='') as csv_file:
+            fieldnames = ['iter', 'train_loss', 'val_loss', 'lr', 'mfu']
+            log_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+            log_writer.writeheader()
+
+    # Write the log data to the file
+    with open(filename, 'a', newline='') as csv_file:
+        log_writer = csv.DictWriter(csv_file, fieldnames=log_data.keys())
+        log_writer.writerow(log_data)
+
 
 def _print_parameter_info(decay_params, nodecay_params):
     num_decay_params = sum(p.numel() for p in decay_params)
@@ -58,7 +79,31 @@ def get_lr(it):
     return cfg.learning_rate.min_lr + coeff * (cfg.learning_rate.learning_rate - cfg.learning_rate.min_lr)
 
 class GramTrainer:
-    def __init__(self, filepath: str = None, **kwargs):
+    """
+    The GramTrainer class provides a high-level API for training models with gradient accumulation and model 
+    specific configuration.
+
+    Attributes:
+        train_dataloader: DataLoader for the training data.
+        val_dataloader: DataLoader for the validation data.
+
+    Note:
+        The train and validation data are expected to be in binary format and are loaded from files whose 
+        paths are provided during the initialization of the class.
+    """
+
+    def __init__(self, 
+                 filepath: str = None, 
+                 **kwargs):
+        """
+        Initializes the trainer with the file path for the train and validation data, the model configuration,
+        the model, the optimizer, and the scaler.
+
+        Args:
+            filepath: The directory path of the binary data files 'train.bin' and 'val.bin'.
+            **kwargs: Additional keyword arguments for initializing the model configuration.
+        """
+
         self._init_paths(filepath)
         self._check_files_exist()
 
@@ -66,35 +111,39 @@ class GramTrainer:
         self.val_dataloader = self.init_dataloader(self.val_file)
 
         self._init_config(**kwargs)
+        self._init_file_paths()
         self.init_model()
         self.init_optimizer()
         self._init_scaler()
 
-        self._init_wandb()
         self._init_ctx()
         self._update_gradient_accumulation_steps()
 
-    def _init_paths(self, filepath):
+    def _init_paths(self, filepath: str) -> None:
+        """
+        Initializes the paths for the training and validation data files.
+
+        Args:
+            filepath: The directory path of the binary data files 'train.bin' and 'val.bin'.
+        """
+
         self.train_file = os.path.join(filepath, 'train.bin')
         self.val_file = os.path.join(filepath, 'val.bin')
 
     def _check_files_exist(self):
+        """
+        Checks if the training and validation data files exist, raising a FileNotFoundError if they do not.
+        """
+
         for file in [self.train_file, self.val_file]:
             if not os.path.exists(file):
                 raise FileNotFoundError(f'{file} not found.')
 
-    def _init_wandb(self):
-        if cfg.ddp.ddp:
-            if torch.distributed.get_rank() == 0:
-                wandb.login(key=cfg.io_metrics.wandb_api_key)
-                if cfg.io_metrics.wandb_log:
-                    wandb.init(project=cfg.io_metrics.wandb_project, name=cfg.io_metrics.wandb_run_name)
-        else:
-            wandb.login(key=cfg.io_metrics.wandb_api_key)
-            if cfg.io_metrics.wandb_log:
-                wandb.init(project=cfg.io_metrics.wandb_project, name=cfg.io_metrics.wandb_run_name)
+    def _init_ctx(self) -> None:
+        """
+        Initializes the context manager for mixed precision training.
+        """
 
-    def _init_ctx(self):
         ptdtype = {'float32': torch.float32,
                    'bfloat16': torch.bfloat16,
                    'float16': torch.float16}[cfg.system.dtype]
@@ -102,14 +151,18 @@ class GramTrainer:
         self.ctx = nullcontext() if cfg.system.use_cuda else torch.amp.autocast(device_type='cuda', 
                                                                                 dtype=ptdtype)
 
-    def _update_gradient_accumulation_steps(self):
+    def _update_gradient_accumulation_steps(self) -> None:
+        """
+        Updates the number of gradient accumulation steps based on the DDP world size.
+        """
+
         if cfg.ddp.ddp:
             ddp_world_size = int(os.environ['WORLD_SIZE'])
             assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
             cfg.data.gradient_accumulation_steps //= ddp_world_size
 
 
-    def _init_config(self, **kwargs):
+    def _init_config(self, **kwargs) -> None:
         """
         Initialize the configuration for the trainer.
 
@@ -146,7 +199,35 @@ class GramTrainer:
             else:  # if no break, attribute was not found in any subconfig
                 raise ValueError(f"Invalid config key: {key}")
 
-    def init_model(self):
+    def _init_file_paths(self) -> None:
+        """
+        Initializes the file paths for saving the model state and the training log.
+
+        This method first determines the library directory based on the "cfg.io_metrics.folder" attribute.
+        It then builds the file path for saving the model state and the training log.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        def build_file_path(file_format: str, *args) -> str:
+            return os.path.join(cfg.io_metrics.out_dir, file_format.format(*args))
+        
+        # Determine the library directory based on the "cfg.io_metrics.folder" attribute
+        if cfg.io_metrics.out_dir is None:
+            self.lib_dir = os.path.dirname(os.path.realpath(__file__)) # Use the current directory
+        else:
+            self.lib_dir = cfg.io_metrics.out_dir
+
+        # Get the file path configurations from the '_log_build_file_path' method
+        file_path_configs = self._log_build_file_path()
+
+        # Build the file path for saving the model
+        self.file_path = build_file_path(file_path_configs['file_format'], *file_path_configs['args'])
+
+    def init_model(self) -> None:
         """
         Initializes the model for training.
 
@@ -169,9 +250,14 @@ class GramTrainer:
                                vocab_size = cfg.gpt.vocab_size,
                                dropout = cfg.gpt.dropout
                                )
+        
+        # Device setup
+        self.device = int(os.environ["LOCAL_RANK"]) if cfg.ddp.ddp \
+                    else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # If specified in the configuration, resume training from a checkpoint
         if cfg.io_metrics.init_from == 'resume':
+            print(f"Resuming from checkpoint {self.file_path}")
             self._load_model(model)
 
         # Alternatively, If specified in the configuration, initialize from a pretrained model with
@@ -179,10 +265,6 @@ class GramTrainer:
         elif cfg.io_metrics.init_from.startswith('gpt2'):
             print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
             model = GPT.from_pretrained(cfg.io_metrics.init_from)
-
-        # Device setup
-        self.device = int(os.environ["LOCAL_RANK"]) if cfg.ddp.ddp \
-                    else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
    
         # Move the model to the appropriate device
         self.model = model.to(self.device)
@@ -194,7 +276,7 @@ class GramTrainer:
         if cfg.ddp.ddp:
             self.model = DDP(self.model, device_ids=[self.device])
 
-    def init_optimizer(self):
+    def init_optimizer(self) -> None:
         """
         Configures the optimizer for the GPT model.
 
@@ -249,7 +331,7 @@ class GramTrainer:
             print(f"using fused AdamW: {use_fused}")
 
     
-    def _init_scaler(self):
+    def _init_scaler(self) -> None:
         """
         Initialize the scaler for mixed precision training.
 
@@ -274,6 +356,7 @@ class GramTrainer:
 
         dataloader = DataLoader(dataset,
                                 batch_size=cfg.data.batch_size,
+                                num_workers=cfg.system.num_workers,
                                 pin_memory = True,
                                 shuffle = False,
                                 sampler = DistributedSampler(dataset) if cfg.ddp.ddp else None
@@ -284,30 +367,15 @@ class GramTrainer:
 
     def _save_model(self, 
                     iter_num: int,
-                    best_val_loss: float = None):
+                    best_val_loss: float = None)-> None:
         """
         Save the current state of the model to a checkpoint file.
 
         Returns:
             None
         """
-        def build_file_path(file_format: str, *args) -> str:
-            return os.path.join(cfg.io_metrics.out_dir, file_format.format(*args))
-        
-        # Determine the library directory based on the "cfg.io_metrics.folder" attribute
-        if cfg.io_metrics.out_dir is None:
-            lib_dir = os.path.dirname(os.path.realpath(__file__)) # Use the current directory
-        else:
-            lib_dir = cfg.io_metrics.out_dir
-
-        # Get the file path configurations from the '_log_build_file_path' method
-        file_path_configs = self._log_build_file_path()
-
-        # Build the file path for saving the model
-        file_path = build_file_path(file_path_configs['file_format'], *file_path_configs['args'])
-
         # Create the necessary directory structure for the file path
-        os.makedirs(os.path.dirname(file_path), mode=0o755, exist_ok=True)
+        os.makedirs(os.path.dirname(self.file_path), mode=0o755, exist_ok=True)
 
         # The following section is your provided code incorporated into this function:
         raw_model = self.model.module if cfg.ddp.ddp else self.model # unwrap DDP container if needed
@@ -321,11 +389,13 @@ class GramTrainer:
             'config': self.config_to_dict()
         }
 
-        print(f"saving checkpoint to {lib_dir}")
-        torch.save(state, file_path)
+        print(f"saving checkpoint to {self.lib_dir}")
+        torch.save(state, self.file_path)
 
 
-    def _load_model(self, model, optimizer=None) -> None:
+    def _load_model(self,
+                    model, 
+                    optimizer=None) -> None:
         """
         Load a previously saved model and optimizer state from a checkpoint file.
 
@@ -339,30 +409,14 @@ class GramTrainer:
         Raises:
             FileNotFoundError: If the checkpoint file does not exist.
         """
-
-        def build_file_path(file_format: str, *args) -> str:
-            return os.path.join(cfg.io_metrics.out_dir, file_format.format(*args))
-
-        # Determine the library directory based on the "cfg.io_metrics.folder" attribute
-        if cfg.io_metrics.out_dir is None:
-            lib_dir = os.path.dirname(os.path.realpath(__file__))  
-        else:
-            lib_dir = cfg.io_metrics.out_dir
-
-        # Get the file path configurations from the '_log_build_file_path' method
-        file_path_configs = self._log_build_file_path()
-
-        # Build the file path for loading the model
-        file_path = build_file_path(file_path_configs['file_format'], *file_path_configs['args'])
-
-        # Check if the file path exists
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File path '{file_path}' does not exist")
         
-        print(f"Resuming training from {lib_dir}")
-
+        # Check if the file path exists
+        if not os.path.exists(self.file_path):
+            raise FileNotFoundError(f"File path '{self.file_path}' does not exist")
+        
         # Load the state from the file path
-        checkpoint = torch.load(file_path, map_location=self.device)
+        checkpoint = torch.load(self.file_path, 
+                                map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
         
         # Update the 'model_args', 'iter_num', 'best_val_loss', and 'config' attributes
         self.model_args = checkpoint['model_args']
@@ -387,73 +441,104 @@ class GramTrainer:
             optimizer.load_state_dict(checkpoint['optimizer'])
 
 
-    def _train(self,
-               iter_num: int) -> float:
+    def _train(self) -> float:
         """
-        Trains the model on the training data for the specified number of epochs.
+        Trains the model for a given number of iterations on the training data.
 
-        This method will train the model for a specified number of epochs.
-        During each epoch, it will iterate over the training DataLoader, performing a forward and backward pass
-        for each batch of data. Gradient accumulation is used if specified in the configuration, and the 
-        gradients are clipped if a threshold is set in the configuration. After each epoch, the average 
-        training loss is computed and returned.
+        This method sets the model to training mode, initializes the total loss tracker, 
+        and then iterates over all batches in the training data loader. It ensures the data 
+        is on the right device and checks whether backward gradient synchronization is required.
 
-        Args:
-            train_dl (torch.utils.data.DataLoader): The training data loader.
+        For each batch, it performs a forward pass, computes the loss, and then performs a backward 
+        pass to compute the gradients. The total loss is then updated.
+
+        If the number of iterations is a multiple of the gradient accumulation steps or if it's the 
+        last batch, gradients are potentially clipped based on the configuration, and the model 
+        parameters are updated.
+
+        Finally, the average training loss for the epoch is computed and returned.
 
         Returns:
-            avg_train_loss (float): The average training loss for the epoch.
-
+            float: The average training loss for the iteration.
         """
 
         # Set the model to training mode. This enables operations which are only applied during training like dropout
         self.model.train()
 
-        # Iterate over each accumulation step
-        for micro_step in range(cfg.data.gradient_accumulation_steps):
-            # Initialize the variable for tracking the total loss
-            total_loss = 0.0
+        # The best validation loss encountered so far
+        best_val_loss = 1e9
 
-            # Iterate over all batches in the training data loader
-            for x_batch, y_batch in self.train_dataloader:
-                # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
-                x_batch = x_batch.to(self.device)
-                y_batch = y_batch.to(self.device)
+        # Initialize the variable for tracking the total loss
+        total_loss = 0.0
 
-                # Perform a forward pass through the model, getting the logits and loss
-                # Note: the context manager is used to enable mixed precision training
-                with self.ctx:
-                    logits, loss = self.model(x_batch, y_batch)
+        # Initialize validation interval as one third of the len of the training dataloader 
+        val_interval = len(self.train_dataloader) // 3
 
-                # Scale the loss and perform a backward pass to calculate gradients
-                self.scaler.scale(loss).backward()
+        # Iterate over all batches in the training data loader
+        for i, (x_batch, y_batch) in enumerate(self.train_dataloader):
+            # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
+            x_batch = x_batch.to(self.device, non_blocking=True)
+            y_batch = y_batch.to(self.device, non_blocking=True)
 
-                # Add the unscaled loss for this batch to the total loss
-                total_loss += loss.item()
+            # Determine and set the learning rate for this iteration
+            lr = get_lr(i) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
 
-            # Average the total loss by the number of gradient accumulation steps
-            total_loss /= cfg.data.gradient_accumulation_steps
+            # Update learning rate in all parameter groups
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
 
-            if cfg.ddp.ddp:
-                # in DDP training we only need to sync gradients at the last micro step.
-                self.model.require_backward_grad_sync = (micro_step == cfg.data.gradient_accumulation_steps - 1)
+            self.model.require_backward_grad_sync = (i+1) % cfg.data.gradient_accumulation_steps == 0 if cfg.ddp.ddp else True
 
-            # Clip the gradient and step the optimizer and scaler if training in fp16
-            if cfg.optimizer.grad_clip != 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
+            # Perform a forward pass through the model and compute the loss
+            with self.ctx:
+                logits, loss = self.model(x_batch, y_batch)
+                loss = loss / cfg.data.gradient_accumulation_steps
 
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            # Perform a backward pass through the model to compute the gradients
+            self.scaler.scale(loss).backward()
+            total_loss += loss.item()
 
-            # Zero the gradients
-            self.optimizer.zero_grad(set_to_none=True)
+            if ((i+1) % cfg.data.gradient_accumulation_steps == 0) or (i + 1 == len(self.train_dataloader)):
+                # Clip the gradients if a threshold is specified in the configuration
+                if cfg.optimizer.grad_clip != 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
+
+                # Update the model parameters
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+
+            # Check if it's time to perform validation
+            if ((i+1) % val_interval == 0) or (i + 1 == len(self.train_dataloader)):
+                val_loss = self._eval()
+                print(f"train loss: {total_loss / val_interval:.4f}, val loss: {val_loss:.4f}")
+
+                if cfg.io_metrics.log:
+                    log_data = {
+                        'iter': i,
+                        'train_loss': total_loss / val_interval,
+                        'val_loss': val_loss,
+                        'lr': lr
+                    }
+
+                    log_to_csv('training_log.csv', log_data)
+
+                if val_loss < best_val_loss or cfg.io_metrics.always_save_checkpoint:
+                    best_val_loss = val_loss
+                    self._save_model(i, best_val_loss)   
+
+                # update val interval only if it's not the last iteration
+                if (i + 1) != len(self.train_dataloader):
+                    val_interval = val_interval * 2
+
+                self.model.train()
 
         # Compute the average loss over all batches
-        avg_train_loss = total_loss / len(self.train_dataloader)
+        train_loss = total_loss / len(self.train_dataloader)
 
-        # Return the average loss for this epoch
-        return avg_train_loss
+        # Return the average loss for the training data
+        return train_loss
     
     @torch.no_grad()  
     def _eval(self) -> float:
@@ -478,11 +563,11 @@ class GramTrainer:
         self.model.eval()
 
         # Iterate over all batches in the validation data loader
-        for x_batch, y_batch in self.val_dataloader:
+        for i, (x_batch, y_batch) in enumerate(self.val_dataloader):
             
             # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
-            x_batch = x_batch.to(self.device)
-            y_batch = y_batch.to(self.device)
+            x_batch = x_batch.to(self.device, non_blocking=True)
+            y_batch = y_batch.to(self.device, non_blocking=True)
 
             # Perform a forward pass through the model and compute the loss
             with self.ctx:
@@ -497,22 +582,24 @@ class GramTrainer:
         # Return the average loss for the validation data
         return avg_val_loss
 
-    def train(self) -> float:
+    def train(self) -> None:
         """
-        The main function to handle the training process for the model.
+        Trains the model on the training data for a specified number of iterations.
 
-        This function implements the complete training process including parameter updates, evaluation on the validation set, 
-        timing and logging, adjusting learning rate, and saving the model with the best validation loss.
+        This method sets up tracking of training loss, lifetime iterations of the process, iterations 
+        in the current epoch, raw model (possibly unwrapped from DDP container), best validation loss 
+        and running memory footprint utility. It then enters a loop for the maximum iterations 
+        specified in the configuration.
 
-        It will continue for a number of iterations defined in the configuration.
+        In each iteration, it adjusts the learning rate, trains for one epoch, and performs evaluations 
+        and logs at regular intervals. If the validation loss is better than the best so far or if 
+        always_save_checkpoint is enabled in the configuration, it saves the model. It also updates 
+        the memory footprint utility at intervals specified in the configuration.
 
         Returns:
-            float: The best validation loss encountered during training.
-
-        Raises:
-            RuntimeError: If the training loop doesn't settle after a certain number of iterations.
+            None
         """
-        
+
         # Initialize the variable for tracking the training loss
         t0 = time.time()
 
@@ -525,43 +612,13 @@ class GramTrainer:
         # Unwrap the DDP container (DistributedDataParallel) if needed to get the raw model
         raw_model = self.model.module if cfg.ddp.ddp else self.model
 
-        # The best validation loss encountered so far
-        best_val_loss = 1e9
-
         # Initialize the running memory footprint utility (MFU) as -1.0
         running_mfu = -1.0
 
         for iter_num in range(cfg.optimizer.max_iters):
-            
-            # Determine and set the learning rate for this iteration
-            lr = get_lr(iter_num) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
-
-            # Update learning rate in all parameter groups
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
-                
+                              
             # Train for one epoch
-            train_loss = self._train(iter_num=iter_num)
-
-            # Evaluate on validation set at regular intervals and on the first device (if multiple devices are used)
-            if iter_num % cfg.io_metrics.eval_interval ==  0 and (not cfg.ddp.ddp or self.device == 0):
-                val_loss = self._eval()
-                tqdm.write(f"step {iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}",
-                           end='\n' if cfg.ddp.ddp else '\r')
-
-                if cfg.io_metrics.wandb_log:
-                    wandb.log({
-                        'iter': iter_num,
-                        'train_loss': train_loss,
-                        'val_loss': val_loss,
-                        'lr': lr,
-                        'mfu': running_mfu * 100,
-                    })
-
-                if val_loss < best_val_loss or cfg.io_metrics.always_save_checkpoint:
-                    best_val_loss = val_loss
-                    self._save_model(iter_num,
-                                     best_val_loss)   
+            train_loss = self._train()
 
             local_iter_num += 1
 
@@ -575,10 +632,9 @@ class GramTrainer:
                 if local_iter_num >= 5:
                     mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
                     running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-                tqdm.write(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%",
-                           end='\n' if cfg.ddp.ddp else '\r')
+                print(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
 
-    def config_to_dict(self):
+    def config_to_dict(self) -> dict:
         """
         list all subconfigurations in a dictionary
         """
@@ -595,7 +651,7 @@ class GramTrainer:
         
         return subconfigs       
 
-    def _log_build_file_path(self):
+    def _log_build_file_path(self) -> dict:
         """
         Builds the file path for saving the model state.
 
@@ -604,7 +660,7 @@ class GramTrainer:
         """
 
         file_path_configs = {
-            "file_format": cfg.io_metrics.wandb_run_name + '_{}_{}_{}_{}_{}_{}_{}.state',
+            "file_format": cfg.io_metrics.run_name + '_{}_{}_{}_{}_{}_{}_{}.state',
             "args": (cfg.gpt.block_size, cfg.gpt.vocab_size, cfg.gpt.n_layer,
                         cfg.gpt.n_head, cfg.gpt.n_embd, cfg.gpt.dropout, cfg.gpt.bias)
         }

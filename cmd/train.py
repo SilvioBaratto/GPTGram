@@ -76,11 +76,9 @@ def arg_parser():
     parser.add_argument('--eval_only', type=bool, default=cfg.io_metrics.eval_only, help='Evaluate only')
     parser.add_argument('--always_save_checkpoint', type=bool, default=cfg.io_metrics.always_save_checkpoint, help='Always save checkpoint')
     parser.add_argument('--init_from', type=str, default=cfg.io_metrics.init_from, help='Initialize from')
-    parser.add_argument('--wandb_log', type=bool, default=cfg.io_metrics.wandb_log, help='Use wandb for logging')
-    parser.add_argument('--wandb_project', type=str, default=cfg.io_metrics.wandb_project, help='Wandb project name')
-    parser.add_argument('--wandb_run_name', type=str, default=cfg.io_metrics.wandb_run_name, help='Wandb run name')
+    parser.add_argument('--log', type=bool, default=cfg.io_metrics.log, help='Use wandb for logging')
+    parser.add_argument('--run_name', type=str, default=cfg.io_metrics.run_name, help='Wandb run name')
     parser.add_argument('--folder', type=str, default=cfg.io_metrics.folder, help='Name')
-    parser.add_argument('--wandb_api_key', type=str, default=cfg.io_metrics.wandb_api_key, help='Wandb API key')
 
     # Data Config
     parser.add_argument('--gradient_accumulation_steps', type=int, default=cfg.data.gradient_accumulation_steps, help='Gradient accumulation steps')
