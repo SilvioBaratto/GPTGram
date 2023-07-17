@@ -1,87 +1,65 @@
 # GPTGram
-Telegram chatbot API using generative pretraining transformers
+GPTGram is a project that combines the power of Generative Pretraining Transformers (GPT) with the versatility of Telegram's API to create a responsive and interactive chatbot. It utilizes a model trained on chat data to respond to messages in a human-like manner.
 
-### Installing from source
-
-You can clone this repository on your local machines using:
+## Installation
+You can clone the GPTGram repository and install the package using the following commands:
 
 ```bash
 > git clone https://github.com/SilvioBaratto/GPTGram
-```
-
-To install the package:
-
-```bash
 > cd GPTGram
 > ./install.sh
 ```
 
----
+## Requirements
+Before using the GPTGram Telegram chatbot API, ensure you have installed the dependencies listed in the `requirements.txt` file. Additionally, if you intend to use Flash Attention instead of slow attention, you are recommended to install PyTorch 2.0. Depending on your CUDA version, follow the respective steps:
 
-# Prepare Chat Data for Training
+- For CUDA 11.8:
+```bash
+pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cu118
+```
 
-This repository contains a Python script `prepare.py` in `data` folder that helps prepare chat data for training a language model. The script reads chat data from text files, filters out specified phrases (like "image omitted", "sticker omitted", etc.), removes timestamps, and encodes the text using Byte-Pair Encoding (BPE). The encoded tokens are then written to a binary output file.
+- For CUDA 11.7:
+```bash
+pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cu117
+```
 
-### Installation Requirements
+- For CPU only:
+```bash
+pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cpu
+```
 
-Before using the GPTGram Telegram chatbot API, make sure to install the required dependencies listed in the `requirements.txt` file. Additionally, if you want to use Flash Attention instead of slow attention, it is recommended to install PyTorch 2.0 from the following sources based on your CUDA version:
-
-- If CUDA 11.8 is installed, run the following command:
-
-  ```bash
-  pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cu118
-  ```
-
-- If CUDA 11.7 is installed, run the following command:
-
-  ```bash
-  pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cu117
-  ```
-
-- If you are using CPU only, run the following command:
-
-  ```bash
-  pip3 install numpy --pre torch torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/nightly/cpu
-  ```
-
-These commands will install the necessary versions of NumPy, Torch, TorchVision, and TorchAudio based on your CUDA configuration.
-
-Finally, you can install the remaining dependencies using:
+Next, install the remaining dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This will install all the required Python libraries and dependencies needed to run GPTGram successfully.
+## Preparing Chat Data for Training
+GPTGram provides a script named `prepare.py` located in the `data` directory to facilitate chat data preparation for training. It processes text files, filters specified phrases, removes timestamps, and encodes the text using Byte-Pair Encoding (BPE). The processed tokens are then written to a binary output file.
 
----
+To use this:
 
-## How to Use
+1. Ensure chat data files are located in a specific directory. By default, it looks for `.txt` files in the `chats/` directory and its subdirectories. You can specify a different directory with the `--folder` argument.
 
-1. The script expects chat data files to be located in a specific directory. By default, it looks for `.txt` files in the `chats/` directory and its subdirectories. If your data is located elsewhere, you can specify the directory with the `--folder` argument.
+2. Run the script with the following command:
+```bash
+python prepare.py --folder <data_directory>
+```
+Replace `<data_directory>` with the path to your chat data.
 
-2. To run the script, use the following command:
+3. The script generates a `train.bin` and `val.bin` file containing the Byte-Pair Encoded tokens of your chat data.
 
-    ```bash
-    python prepare.py --folder <data_directory>
-    ```
+Note: The script assumes the input chat files have a specific format where timestamps appear like `[12/12/12, 12:12:12]`. If your files are formatted differently, modify the script to match your format. The `prepare.py` script uses Byte-Pair Encoding (BPE) for tokenization and `tiktoken` library for tokenization.
 
-    Replace `<data_directory>` with the path to your chat data. For example, if your data is in a directory called `my_data/`, you would run:
+## Training
+GPTGram allows you to train the model on your own data. A convenient shell script named `train.sh` simplifies the process of job submission to an HPC cluster using Slurm workload manager. This script will prompt you to enter computational resources requirements, generate a temporary Slurm job submission script, and submit it.
 
-    ```bash
-    python prepare.py --folder my_data/
-    ```
+To learn more about this script and its usage, refer to its dedicated [README.md](cluster/README.md) file.
 
-3. The script will create a binary file `train.bin` in the current directory. This file contains the Byte-Pair Encoded tokens of your chat data.
+## Inference
+Once the model is trained, you can utilize it to generate responses. The Telegram API integrates with the model, creating a functional chatbot. Instructions to adjust bot configurations, such as GPT parameters, IO Metrics configurations, optimizer settings, learning rate configurations, DDP configurations, system settings, or sampling configurations, are provided in the `arg_parser()` function located in the [argparser.py](GPTGram/argparser.py) file.
 
-4. If everything goes well, you should see a message like `data has X tokens`, where X is the total number of tokens in your data.
-
-## Notes
-
-- The script assumes that the input chat files have a specific format, specifically that timestamps appear in a format like `[12/12/12, 12:12:12]`. If your chat files are formatted differently, you will need to modify the script to match your format.
-- The `prepare.py` script uses Byte-Pair Encoding (BPE) for tokenization. This is a form of subword tokenization that is used in many modern language models, including GPT-2 and GPT-3.
-- This script uses the `tiktoken` library for tokenization. This is an open-source library developed by OpenAI, and it uses the same tokenization method as GPT-2 and GPT-3.
-
----
+## Contributing
+Contributions to the GPTGram project are welcomed. Feel free to fork the repository and submit pull requests.
 
 Remember to replace `<repository_directory>` with the directory name of your actual repository.

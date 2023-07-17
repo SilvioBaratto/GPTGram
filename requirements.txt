@@ -3,7 +3,8 @@ numpy
 transformers
 datasets
 tiktoken
-wandb
 tqdm
 regex
-
+telethon
+python-dotenv
+asyncio

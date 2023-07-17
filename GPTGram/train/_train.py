@@ -1,19 +1,13 @@
 import os
-import time
-import math
-import inspect
-from contextlib import nullcontext
-import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader
-import torch.multiprocessing as mp
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
-from tqdm.auto import tqdm
-from ..config import Config as cfg
-from ..preprocessing import GramDataset
-from ..model import GPT
 import csv
+import math
+import torch
+import time
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from ..preprocessing import GramDataset
+from ..config import Config as cfg
+from ..base import BaseGram
 
 def log_to_csv(filename: str, log_data: dict):
     """
@@ -27,7 +21,7 @@ def log_to_csv(filename: str, log_data: dict):
     # If the file does not exist, create it and write the header
     if not os.path.isfile(filename):
         with open(filename, 'w', newline='') as csv_file:
-            fieldnames = ['iter', 'train_loss', 'val_loss', 'lr', 'mfu']
+            fieldnames = ['train_loss', 'val_loss', 'lr']
             log_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             log_writer.writeheader()
 
@@ -35,14 +29,6 @@ def log_to_csv(filename: str, log_data: dict):
     with open(filename, 'a', newline='') as csv_file:
         log_writer = csv.DictWriter(csv_file, fieldnames=log_data.keys())
         log_writer.writerow(log_data)
-
-
-def _print_parameter_info(decay_params, nodecay_params):
-    num_decay_params = sum(p.numel() for p in decay_params)
-    num_nodecay_params = sum(p.numel() for p in nodecay_params)
-    print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-    print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-
 
 def get_lr(it):
     """
@@ -78,7 +64,7 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
     return cfg.learning_rate.min_lr + coeff * (cfg.learning_rate.learning_rate - cfg.learning_rate.min_lr)
 
-class GramTrainer:
+class GramTrainer(BaseGram):
     """
     The GramTrainer class provides a high-level API for training models with gradient accumulation and model 
     specific configuration.
@@ -92,9 +78,7 @@ class GramTrainer:
         paths are provided during the initialization of the class.
     """
 
-    def __init__(self, 
-                 filepath: str = None, 
-                 **kwargs):
+    def __init__(self, **kwargs):
         """
         Initializes the trainer with the file path for the train and validation data, the model configuration,
         the model, the optimizer, and the scaler.
@@ -103,254 +87,27 @@ class GramTrainer:
             filepath: The directory path of the binary data files 'train.bin' and 'val.bin'.
             **kwargs: Additional keyword arguments for initializing the model configuration.
         """
-
-        self._init_paths(filepath)
-        self._check_files_exist()
+        super().__init__(**kwargs)
+        self._init_paths()
 
         self.train_dataloader = self.init_dataloader(self.train_file)
         self.val_dataloader = self.init_dataloader(self.val_file)
 
-        self._init_config(**kwargs)
-        self._init_file_paths()
-        self.init_model()
-        self.init_optimizer()
-        self._init_scaler()
-
-        self._init_ctx()
-        self._update_gradient_accumulation_steps()
-
-    def _init_paths(self, filepath: str) -> None:
+    def _init_paths(self) -> None:
         """
-        Initializes the paths for the training and validation data files.
+        Initializes the paths for the training and validation data files. and checks if they exist.
 
         Args:
             filepath: The directory path of the binary data files 'train.bin' and 'val.bin'.
         """
 
-        self.train_file = os.path.join(filepath, 'train.bin')
-        self.val_file = os.path.join(filepath, 'val.bin')
-
-    def _check_files_exist(self):
-        """
-        Checks if the training and validation data files exist, raising a FileNotFoundError if they do not.
-        """
+        self.train_file = os.path.join(cfg.io_metrics.folder, 'train.bin')
+        self.val_file = os.path.join(cfg.io_metrics.folder, 'val.bin')
 
         for file in [self.train_file, self.val_file]:
             if not os.path.exists(file):
                 raise FileNotFoundError(f'{file} not found.')
-
-    def _init_ctx(self) -> None:
-        """
-        Initializes the context manager for mixed precision training.
-        """
-
-        ptdtype = {'float32': torch.float32,
-                   'bfloat16': torch.bfloat16,
-                   'float16': torch.float16}[cfg.system.dtype]
-        
-        self.ctx = nullcontext() if cfg.system.use_cuda else torch.amp.autocast(device_type='cuda', 
-                                                                                dtype=ptdtype)
-
-    def _update_gradient_accumulation_steps(self) -> None:
-        """
-        Updates the number of gradient accumulation steps based on the DDP world size.
-        """
-
-        if cfg.ddp.ddp:
-            ddp_world_size = int(os.environ['WORLD_SIZE'])
-            assert cfg.data.gradient_accumulation_steps % ddp_world_size == 0
-            cfg.data.gradient_accumulation_steps //= ddp_world_size
-
-
-    def _init_config(self, **kwargs) -> None:
-        """
-        Initialize the configuration for the trainer.
-
-        This method first loads the default configuration from the 'config.py' file.
-        It then updates the configuration with any keyword arguments passed to the method.
-        Finally, it sets the seed for the random number generator to ensure reproducibility.
-
-        Args:
-            **kwargs: Arbitrary keyword arguments.
-
-        Returns:
-            None
-
-        Raises:
-            None
-        """
-        # Update the configuration with any keyword arguments passed to the method
-        for key, value in kwargs.items():
-            # list all subconfigurations in a dictionary
-            subconfigs = {
-                "gpt": cfg.gpt,
-                "io_metrics": cfg.io_metrics,
-                "data": cfg.data,
-                "optimizer": cfg.optimizer,
-                "learning_rate": cfg.learning_rate,
-                "ddp": cfg.ddp,
-                "system": cfg.system,
-                "sampling": cfg.sampling
-            }
-            for subconfig_name, subconfig in subconfigs.items():
-                if hasattr(subconfig, key):
-                    setattr(subconfig, key, value)
-                    break
-            else:  # if no break, attribute was not found in any subconfig
-                raise ValueError(f"Invalid config key: {key}")
-
-    def _init_file_paths(self) -> None:
-        """
-        Initializes the file paths for saving the model state and the training log.
-
-        This method first determines the library directory based on the "cfg.io_metrics.folder" attribute.
-        It then builds the file path for saving the model state and the training log.
-
-        Args:
-            None
-
-        Returns:
-            None
-        """
-        def build_file_path(file_format: str, *args) -> str:
-            return os.path.join(cfg.io_metrics.out_dir, file_format.format(*args))
-        
-        # Determine the library directory based on the "cfg.io_metrics.folder" attribute
-        if cfg.io_metrics.out_dir is None:
-            self.lib_dir = os.path.dirname(os.path.realpath(__file__)) # Use the current directory
-        else:
-            self.lib_dir = cfg.io_metrics.out_dir
-
-        # Get the file path configurations from the '_log_build_file_path' method
-        file_path_configs = self._log_build_file_path()
-
-        # Build the file path for saving the model
-        self.file_path = build_file_path(file_path_configs['file_format'], *file_path_configs['args'])
-
-    def init_model(self) -> None:
-        """
-        Initializes the model for training.
-
-        This method initializes a model for training. It supports starting from a
-        pretrained model or resuming from a checkpoint. 
-
-        If the model is initialized with CUDA support, it will be moved to the 
-        appropriate device. 
-
-        Returns:
-            model (GPT): The initialized model.
-        """
-        # Initialize a new instance of the model
-        model = GPT()
-        self.model_args = dict(n_layer = cfg.gpt.n_layer,
-                               n_head = cfg.gpt.n_head,
-                               n_embd = cfg.gpt.n_embd,
-                               block_size = cfg.gpt.block_size,
-                               bias = cfg.gpt.bias,
-                               vocab_size = cfg.gpt.vocab_size,
-                               dropout = cfg.gpt.dropout
-                               )
-        
-        # Device setup
-        self.device = int(os.environ["LOCAL_RANK"]) if cfg.ddp.ddp \
-                    else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        # If specified in the configuration, resume training from a checkpoint
-        if cfg.io_metrics.init_from == 'resume':
-            print(f"Resuming from checkpoint {self.file_path}")
-            self._load_model(model)
-
-        # Alternatively, If specified in the configuration, initialize from a pretrained model with
-        # pretrained GPT-2 weights
-        elif cfg.io_metrics.init_from.startswith('gpt2'):
-            print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
-            model = GPT.from_pretrained(cfg.io_metrics.init_from)
-   
-        # Move the model to the appropriate device
-        self.model = model.to(self.device)
-
-        if cfg.system.compile:
-            self.model = torch.compile(self.model)
-
-        # wrap model into DDP container
-        if cfg.ddp.ddp:
-            self.model = DDP(self.model, device_ids=[self.device])
-
-    def init_optimizer(self) -> None:
-        """
-        Configures the optimizer for the GPT model.
-
-        This method first collects all the model parameters that require gradients.
-        It then groups these parameters into two groups based on their dimensionality.
-        Any parameters that are 2D will have weight decay applied to them; all others will not.
-        The method then creates an AdamW optimizer with the given learning rate, betas, and weight decay settings.
-        The method uses the fused version of AdamW if it is available and if the device type is CUDA.
-
-        Args:
-            weight_decay (float): The weight decay (L2 penalty) to apply to the parameters.
-            learning_rate (float): The learning rate for the optimizer.
-            betas (tuple): The coefficients used for computing running averages of gradient and its square.
-            device_type (str): The type of device to run the model on. Can be 'cpu' or 'cuda'.
-
-        Returns:
-            torch.optim.AdamW: The configured AdamW optimizer.
-
-        Examples:
-            >>> gpt = GPT()
-            >>> optimizer = gpt.configure_optimizers(0.01, 0.001, (0.9, 0.999), 'cuda')
-        """
-        param_dict = {pn: p for pn, p in self.model.named_parameters() if p.requires_grad}
-
-        # Group the parameters based on their dimensionality
-        decay_params = [p for p in param_dict.values() if p.dim() >= 2]  # 2D parameters will have weight decay
-        nodecay_params = [p for p in param_dict.values() if p.dim() < 2]  # non-2D parameters will not have weight decay
-
-        # Define optimizer groups with different weight decay settings
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': cfg.optimizer.weight_decay},
-            {'params': nodecay_params, 'weight_decay': 0.0}
-        ]
-
-        if cfg.ddp.ddp and self.device == 0 or not cfg.ddp.ddp:
-            _print_parameter_info(decay_params, nodecay_params)
-
-        # Check if fused AdamW is available and if the device type is CUDA
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and cfg.system.use_cuda
-
-        # Define extra arguments for the optimizer
-        extra_args = dict(fused=True) if use_fused else dict()
-
-        # Create AdamW optimizer with the given settings
-        self.optimizer = torch.optim.AdamW(optim_groups, 
-                                        lr=cfg.learning_rate.learning_rate, 
-                                        betas=cfg.optimizer.betas, 
-                                        **extra_args)
-
-        if not cfg.ddp.ddp or self.device == '0':
-            print(f"using fused AdamW: {use_fused}")
-
-    
-    def _init_scaler(self) -> None:
-        """
-        Initialize the scaler for mixed precision training.
-
-        This method first checks if the device type is CUDA and if the scaler is available.
-        If both conditions are met, it initializes the scaler with the default settings.
-
-        Args:
-            None
-
-        Returns:
-            torch.cuda.amp.GradScaler: The initialized scaler.
-
-        Examples:
-            >>> scaler = self._init_scaler()
-        """
-        # Check if the device type is CUDA and if the scaler is available
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(cfg.system.dtype == 'float16')) \
-            if cfg.system.use_cuda and torch.cuda.amp is not None else nullcontext()
-
+            
     def init_dataloader(self, filepath: str) -> DataLoader:
         dataset = GramDataset(filepath)  # Create a dataset instance
 
@@ -363,84 +120,7 @@ class GramTrainer:
                                 )
 
         return dataloader
-
-
-    def _save_model(self, 
-                    iter_num: int,
-                    best_val_loss: float = None)-> None:
-        """
-        Save the current state of the model to a checkpoint file.
-
-        Returns:
-            None
-        """
-        # Create the necessary directory structure for the file path
-        os.makedirs(os.path.dirname(self.file_path), mode=0o755, exist_ok=True)
-
-        # The following section is your provided code incorporated into this function:
-        raw_model = self.model.module if cfg.ddp.ddp else self.model # unwrap DDP container if needed
-
-        state = {
-            'model': raw_model.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
-            'model_args': self.model_args,
-            'iter_num': iter_num,
-            'best_val_loss': best_val_loss,
-            'config': self.config_to_dict()
-        }
-
-        print(f"saving checkpoint to {self.lib_dir}")
-        torch.save(state, self.file_path)
-
-
-    def _load_model(self,
-                    model, 
-                    optimizer=None) -> None:
-        """
-        Load a previously saved model and optimizer state from a checkpoint file.
-
-        Args:
-            model: The model object to load the saved state into.
-            optimizer (optional): The optimizer object to load the saved state into. 
-
-        Returns:
-            None
-
-        Raises:
-            FileNotFoundError: If the checkpoint file does not exist.
-        """
         
-        # Check if the file path exists
-        if not os.path.exists(self.file_path):
-            raise FileNotFoundError(f"File path '{self.file_path}' does not exist")
-        
-        # Load the state from the file path
-        checkpoint = torch.load(self.file_path, 
-                                map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-        
-        # Update the 'model_args', 'iter_num', 'best_val_loss', and 'config' attributes
-        self.model_args = checkpoint['model_args']
-        self.iter_num = checkpoint['iter_num']
-        self.best_val_loss = checkpoint['best_val_loss']
-        self.config = checkpoint['config']
-
-        # Load the model state from the checkpoint
-        state_dict = checkpoint['model']
-
-        # Fix the keys of the state dictionary
-        unwanted_prefix = '_orig_mod.'
-        for k, v in list(state_dict.items()):
-            if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-
-        # Load the model state into the model
-        model.load_state_dict(state_dict)
-
-        # Load optimizer state if optimizer is provided
-        if optimizer is not None:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-
-
     def _train(self) -> float:
         """
         Trains the model for a given number of iterations on the training data.
@@ -472,7 +152,7 @@ class GramTrainer:
         total_loss = 0.0
 
         # Initialize validation interval as one third of the len of the training dataloader 
-        val_interval = len(self.train_dataloader) // 3
+        val_interval = len(self.train_dataloader) // cfg.io_metrics.eval_interval
 
         # Iterate over all batches in the training data loader
         for i, (x_batch, y_batch) in enumerate(self.train_dataloader):
@@ -516,7 +196,6 @@ class GramTrainer:
 
                 if cfg.io_metrics.log:
                     log_data = {
-                        'iter': i,
                         'train_loss': total_loss / val_interval,
                         'val_loss': val_loss,
                         'lr': lr
@@ -633,39 +312,6 @@ class GramTrainer:
                     mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
                     running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
                 print(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
-
-    def config_to_dict(self) -> dict:
-        """
-        list all subconfigurations in a dictionary
-        """
-        subconfigs = {
-            **cfg.gpt.__dict__,
-            **cfg.io_metrics.__dict__,
-            **cfg.data.__dict__,
-            **cfg.optimizer.__dict__,
-            **cfg.learning_rate.__dict__,
-            **cfg.ddp.__dict__,
-            **cfg.system.__dict__,
-            **cfg.sampling.__dict__
-        }
-        
-        return subconfigs       
-
-    def _log_build_file_path(self) -> dict:
-        """
-        Builds the file path for saving the model state.
-
-        Returns:
-            file_path_configs (dict): A dictionary containing the file format and arguments to be used for building the file path.
-        """
-
-        file_path_configs = {
-            "file_format": cfg.io_metrics.run_name + '_{}_{}_{}_{}_{}_{}_{}.state',
-            "args": (cfg.gpt.block_size, cfg.gpt.vocab_size, cfg.gpt.n_layer,
-                        cfg.gpt.n_head, cfg.gpt.n_embd, cfg.gpt.dropout, cfg.gpt.bias)
-        }
-
-        return file_path_configs
 
         
 

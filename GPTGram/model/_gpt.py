@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import os
+import tiktoken
 from ._transformer import LayerNorm, Block
 from ..config import Config as cfg
 
@@ -74,10 +75,6 @@ class GPT(nn.Module):
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * cfg.gpt.n_layer))
-
-        # report number of parameters
-        if not cfg.ddp.ddp or os.environ.get('RANK', '0') == '0':
-            print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
     def _init_config(self, **kwargs):
         """
@@ -192,12 +189,6 @@ class GPT(nn.Module):
 
         Raises:
             AssertionError: If the length of the sequence to be processed exceeds the model's block size.
-
-        Examples:
-            >>> gpt_model = GPT()  # assuming GPT is already initialized
-            >>> input_ids = torch.randint(0, gpt_model.cfg.gpt.vocab_size, (1, gpt_model.cfg.gpt.block_size))  # random sequence
-            >>> output_logits, output_loss = gpt_model.forward(input_ids)
-
         """
         device = idx.device
         b, t = idx.size()
@@ -242,11 +233,6 @@ class GPT(nn.Module):
 
         Raises:
             AssertionError: If the new block size is larger than the current block size.
-
-        Examples:
-            >>> gpt_model = GPT()  # assuming GPT is already initialized
-            >>> gpt_model.crop_block_size(512)  # reduce the block size to 512
-
         """
         assert cfg.gpt.block_size <= cfg.gpt.block_size, "New block size must be smaller than or equal to the current block size"
 
@@ -260,140 +246,8 @@ class GPT(nn.Module):
                 # If it does, crop the attention bias to the new block size
                 block.attn.bias = block.attn.bias[:,:,:cfg.gpt.block_size,:cfg.gpt.block_size]
 
-    @classmethod
-    def from_pretrained(cls, model_type, override_args=None):
-        """
-        Creates a GPT model from a pretrained model.
-
-        This method initializes a GPT model with the architecture and weights of a pretrained GPT model.
-        The method supports 'gpt2', 'gpt2-medium', 'gpt2-large', and 'gpt2-xl' as the model_type.
-        For these models, the method determines n_layer, n_head and n_embd from the model_type.
-        The model's configuration is then updated with these values.
-        The dropout rate can be overridden if desired.
-        Finally, the method aligns and matches the pretrained model's state_dict with the new model's state_dict,
-        and copies the pretrained model's weights into the new model's weights.
-
-        Args:
-            model_type (str): The type of the pretrained model. Can be 'gpt2', 'gpt2-medium', 'gpt2-large', or 'gpt2-xl'.
-            override_args (dict, optional): A dictionary of model configurations to override. Defaults to None.
-
-        Returns:
-            GPT: The GPT model initialized with the pretrained model's weights.
-
-        Raises:
-            AssertionError: If the model_type is not supported, or if the state_dicts of the pretrained model and the new model are not compatible.
-
-        Examples:
-            >>> GPT.from_pretrained('gpt2')  # initializes a GPT model with the architecture and weights of the 'gpt2' pretrained model
-            >>> GPT.from_pretrained('gpt2', {'dropout': 0.1})  # initializes a GPT model with the architecture and weights of the 'gpt2' pretrained model, and sets the dropout rate to 0.1
-
-        """
-        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}, "Model type must be one of 'gpt2', 'gpt2-medium', 'gpt2-large', or 'gpt2-xl'"
-        override_args = override_args or {}  # default to empty dict if no override_args were provided
-
-        # Only dropout can be overridden
-        assert all(k == 'dropout' for k in override_args), "Only 'dropout' can be overridden"
-        
-        # Determine n_layer, n_head and n_embd from model_type
-        config_args = {
-            'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
-            'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
-            'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
-            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
-        }[model_type]
-
-
-        # Force vocab_size=50257, block_size=1024, and bias=True
-        config_args['vocab_size'] = 50257  # always 50257 for GPT model checkpoints
-        config_args['block_size'] = 1024  # always 1024 for GPT model checkpoints
-        config_args['bias'] = True  # always True for GPT model checkpoints
-
-        # Override the dropout rate, if desired
-        if 'dropout' in override_args:
-            config_args['dropout'] = override_args['dropout']
-
-        # Initialize a GPT model
-        model = GPT()
-        
-        # Obtain the state_dict of the new model and the keys in the state_dict
-        sd = model.state_dict()
-        sd_keys = list(sd.keys())
-
-        # Ignore the '.attn.bias' parameter in the state_dict of the new model
-        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')]
-
-        from transformers import GPT2LMHeadModel
-        # Initialize a pretrained GPT model from Hugging Face's Transformers library
-        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
-
-        # Obtain the state_dict of the pretrained model and the keys in the state_dict
-        sd_hf = model_hf.state_dict()
-        sd_keys_hf = list(sd_hf.keys())
-
-        # Ignore the '.attn.masked_bias' and '.attn.bias' parameters in the state_dict of the pretrained model
-        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias') and not k.endswith('.attn.bias')]
-
-        # Ensure all of the parameters are aligned and match in names and shapes
-        assert len(sd_keys_hf) == len(sd_keys), "Mismatched keys in the state_dicts of the new model and the pretrained model"
-
-        # Copy the weights from the pretrained model's state_dict to the new model's state_dict
-        for k in sd_keys_hf:
-            if any(k.endswith(w) for w in ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']):
-                # Special treatment for the Conv1D weights which need to be transposed
-                assert sd_hf[k].shape[::-1] == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k].t())
-            else:
-                # Vanilla copy for the other parameters
-                assert sd_hf[k].shape == sd[k].shape
-                with torch.no_grad():
-                    sd[k].copy_(sd_hf[k])
-
-        return model
-
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """
-        Estimates the model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
-
-        This method first calculates the number of flops per iteration using the model's configuration
-        parameters and the given fwdbwd_per_iter. It then computes the MFU by comparing the estimated 
-        flops with the peak flops of an A100 GPU in bfloat16 mode.
-
-        Args:
-            fwdbwd_per_iter (float): The number of forward and backward passes per iteration.
-            dt (float): The time duration of the iteration in seconds.
-
-        Returns:
-            float: The estimated model flops utilization (MFU).
-
-        Examples:
-            >>> gpt = GPT()
-            >>> mfu = gpt.estimate_mfu(2, 0.01)
-        """
-        # Number of parameters in the model
-        N = self.get_num_params()
-
-        # Unpack key parameters from the configuration
-        L, H, Q, T = cfg.gpt.n_layer, cfg.gpt.n_head, cfg.gpt.n_embd // cfg.gpt.n_head, cfg.gpt.block_size
-
-        # Estimate the number of floating point operations (flops) per token and per iteration
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-
-        # Compute flops achieved per second
-        flops_achieved = flops_per_iter * (1.0 / dt)
-
-        # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        flops_promised = 312e12
-
-        # Compute model flops utilization (MFU) as the ratio of achieved flops to peak flops
-        mfu = flops_achieved / flops_promised
-
-        return mfu
-
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def sample(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
         Generates new tokens conditioned on the input sequence of tokens.
 
@@ -412,12 +266,9 @@ class GPT(nn.Module):
 
         Returns:
             torch.LongTensor: The completed sequence of tokens.
-
-        Examples:
-            >>> gpt = GPT()
-            >>> idx = torch.LongTensor([[50256, 50256]])
-            >>> completed_sequence = gpt.generate(idx, 10, temperature=0.7, top_k=50)
         """
+        newline_token = tiktoken.get_encoding("gpt2").encode("\n")[0]
+
         for _ in range(max_new_tokens):
             # If the sequence context is growing too long, crop it to block size
             idx_cond = idx if idx.size(1) <= cfg.gpt.block_size else idx[:, -cfg.gpt.block_size:]
@@ -435,5 +286,9 @@ class GPT(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)
             # Append the sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1)
+
+            # If the last generated token is a newline, break the loop
+            if idx_next.item() == newline_token:
+                break
 
         return idx

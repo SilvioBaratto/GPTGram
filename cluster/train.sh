@@ -27,9 +27,9 @@ then
     exit 1
 fi
 
-# Ask the user if they want to resume training from an existing model
-echo "Do you want to resume training from an existing model? (yes/no)"
-read resume
+# Ask the user for any extra flags for the torchrun command
+echo "Please enter any extra flags for the torchrun command (or press enter for none):"
+read torchrun_flags
 
 # Create a temporary job script
 jobscript=$(mktemp)
@@ -69,10 +69,10 @@ EOF
 if [[ "$resume" == "yes" ]]
 then
     # Resume training from an existing model
-    echo "srun torchrun --standalone --nproc_per_node=${ngpus:-0} ../cmd/train.py --init_from=resume" >> $jobscript
+    echo "srun torchrun --standalone --nproc_per_node=${ngpus:-0} ../cmd/train.py $torchrun_flags" >> $jobscript
 else
     # Start training from scratch
-    echo "srun torchrun --standalone --nproc_per_node=${ngpus:-0} ../cmd/train.py" >> $jobscript
+    echo "srun torchrun --standalone --nproc_per_node=${ngpus:-0} ../cmd/train.py $torchrun_flags" >> $jobscript
 fi
 
 # Submit the job script
