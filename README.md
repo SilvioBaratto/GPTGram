@@ -54,7 +54,7 @@ Note: The script assumes the input chat files have a specific format where times
 ## Training
 GPTGram allows you to train the model on your own data. A convenient shell script named `train.sh` simplifies the process of job submission to an HPC cluster using Slurm workload manager. This script will prompt you to enter computational resources requirements, generate a temporary Slurm job submission script, and submit it.
 
-To learn more about this script and its usage, refer to its dedicated [README.md](cluster/README.md) file.
+To learn more about this script and its usage, refer to its dedicated [README.md](cluster/README.md) file. For a complete explanation of the usage of the `train.py` script, refer to its dedicated [README.md](cmd/README.md) file.
 
 ## Inference
 Once the model is trained, you can utilize it to generate responses. The Telegram API integrates with the model, creating a functional chatbot. Instructions to adjust bot configurations, such as GPT parameters, IO Metrics configurations, optimizer settings, learning rate configurations, DDP configurations, system settings, or sampling configurations, are provided in the `arg_parser()` function located in the [argparser.py](GPTGram/argparser.py) file.

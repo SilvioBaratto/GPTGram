@@ -76,7 +76,7 @@ These flags are used to control system-level settings.
 Here's an example of how to use these flags:
 
 ```bash
-torchrun --standalone --nproc_per_node=1 train.py --block_size 1024 --n_layer 12 --n_head 12 --n_embd 768 --learning_rate 0.001 --max_iters 50
+torchrun --standalone --nproc_per_node=8 train.py --init_from=resume --folder=--folder=/path/to/your/model/checkpoint --learning_rate 0.001 --max_iters 50
 ```
 
 This will train the model with a block size of 1024, 12 layers, 12 heads, an embedding size of 768, a learning rate of 0.001, and a maximum of 50,000 iterations.
@@ -112,7 +112,7 @@ Remember, you should also use the `--init_from` and `--folder` flags to specify 
 Here's an example of how to use these flags:
 
 ```bash
-python3 sample.py --start "Once upon a time" --num_samples 5 --max_new_tokens 100 --temperature 0.8 --top_k 20 --init_from /path/to/your/model/checkpoint
+python3 sample.py --start "Once upon a time" --max_new_tokens 100 --temperature 0.8 --top_k 20 --init_from=gpt2-xl 
 ```
 
 This will generate 5 independent samples, each up to 100 tokens long, starting with the phrase "Once upon a time". The sampling will use a temperature of 0.8 and consider the top 20 alternatives at each step. The samples will be generated from the model specified by the path in the `--init_from` flag.
