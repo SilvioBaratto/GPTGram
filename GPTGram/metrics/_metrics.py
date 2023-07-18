@@ -25,7 +25,7 @@ class Metrics:
         print(f"ROUGE-L: {rouge_l:.2f}")
         print(f"Perplexity: {perplexity:.2f}")
 """
-    def __init__(self, model, data_loader):
+    def __init__(self, model=None, data_loader=None):
         self.model = model
         self.data_loader = data_loader
 
