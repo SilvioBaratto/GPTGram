@@ -3,8 +3,10 @@ import csv
 import math
 import torch
 import time
+import itertools
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from ..preprocessing import GramDataset
 from ..config import Config as cfg
 from ..base import BaseGram
@@ -21,7 +23,7 @@ def log_to_csv(filename: str, log_data: dict):
     # If the file does not exist, create it and write the header
     if not os.path.isfile(filename):
         with open(filename, 'w', newline='') as csv_file:
-            fieldnames = ['train_loss', 'val_loss', 'lr']
+            fieldnames = ['train_loss', 'val_loss', 'eval_time', 'lr']
             log_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             log_writer.writeheader()
 
@@ -30,40 +32,7 @@ def log_to_csv(filename: str, log_data: dict):
         log_writer = csv.DictWriter(csv_file, fieldnames=log_data.keys())
         log_writer.writerow(log_data)
 
-def get_lr(it):
-    """
-    Compute the learning rate for the current training iteration using a cosine decay with warmup schedule.
-
-    The learning rate schedule consists of three phases:
-    1) Linear warmup for a number of steps specified by `cfg.learning_rate.warmup_iters`.
-    2) Cosine decay until `cfg.learning_rate.lr_decay_iters` steps.
-    3) Constant learning rate equal to `cfg.learning_rate.min_lr` after `cfg.learning_rate.lr_decay_iters` steps.
-
-    Args:
-        it (int): The current training iteration.
-
-    Returns:
-        float: The learning rate for the current training iteration.
-
-    Raises:
-        AssertionError: If the decay ratio is not in the range [0, 1].
-
-    Note:
-        The learning rate, warmup steps, decay steps, and minimum learning rate are all specified in the
-        configuration object `cfg.learning_rate`.
-    """
-    # learning rate decay scheduler (cosine with warmup)
-    if it < cfg.learning_rate.warmup_iters:
-        return cfg.learning_rate.learning_rate * it / cfg.learning_rate.warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
-    if it > cfg.learning_rate.lr_decay_iters:
-        return cfg.learning_rate.min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (it - cfg.learning_rate.warmup_iters) / (cfg.learning_rate.lr_decay_iters - cfg.learning_rate.warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
-    return cfg.learning_rate.min_lr + coeff * (cfg.learning_rate.learning_rate - cfg.learning_rate.min_lr)
-
+        
 class GramTrainer(BaseGram):
     """
     The GramTrainer class provides a high-level API for training models with gradient accumulation and model 
@@ -93,6 +62,12 @@ class GramTrainer(BaseGram):
         self.train_dataloader = self.init_dataloader(self.train_file)
         self.val_dataloader = self.init_dataloader(self.val_file)
 
+        if cfg.system.walltime is not None:
+            h, m, s = map(int, cfg.system.walltime.split(':'))
+            self.wall_time = h * 3600 + m * 60 + s
+        # Get the time at the start of the job.
+        self.start_time = time.time()
+
     def _init_paths(self) -> None:
         """
         Initializes the paths for the training and validation data files. and checks if they exist.
@@ -101,8 +76,8 @@ class GramTrainer(BaseGram):
             filepath: The directory path of the binary data files 'train.bin' and 'val.bin'.
         """
 
-        self.train_file = os.path.join(cfg.io_metrics.folder, 'train.bin')
-        self.val_file = os.path.join(cfg.io_metrics.folder, 'val.bin')
+        self.train_file = os.path.join(cfg.io_metrics.dataset, 'train.bin')
+        self.val_file = os.path.join(cfg.io_metrics.dataset, 'val.bin')
 
         for file in [self.train_file, self.val_file]:
             if not os.path.exists(file):
@@ -146,26 +121,48 @@ class GramTrainer(BaseGram):
         self.model.train()
 
         # The best validation loss encountered so far
-        best_val_loss = 1e9
+        best_val_loss = self.best_val_loss if hasattr(self, 'best_val_loss') else 1e9
 
         # Initialize the variable for tracking the total loss
         total_loss = 0.0
 
-        # Initialize validation interval as one third of the len of the training dataloader 
-        val_interval = len(self.train_dataloader) // cfg.io_metrics.eval_interval
+        # evaluation time
+        eval_time = time.time()
 
         # Iterate over all batches in the training data loader
-        for i, (x_batch, y_batch) in enumerate(self.train_dataloader):
+        start_iter = self.iter_num if hasattr(self, 'iter_num') else 0
+
+        # Initialize warmup factor
+        warmup_iters = int(len(self.train_dataloader) * 0.1)
+
+        # Initialize lr scheduler
+        lr_decay_iters = int(len(self.train_dataloader) * 0.9)
+
+        # Initialize scheduler
+        scheduler = CosineAnnealingLR(self.optimizer, 
+                                    T_max=lr_decay_iters, 
+                                    eta_min=cfg.learning_rate.min_lr)
+        
+        # Iterate over all batches in the training data loader
+        for idx, (x_batch, y_batch) in enumerate(itertools.islice(self.train_dataloader, start_iter, None)):
+            i = idx + start_iter
+            if cfg.system.is_slurm:
+                elapsed_time = time.time() - self.start_time
+                # save the model and finish the loop ten minutes before walltime
+                if self.wall_time - elapsed_time <= 10 * 60: 
+                    self._save_model(i, best_val_loss)
+                    # Break the loop and end the job to avoid SLURM termination
+                    break  
+
             # Check if CUDA is available and if it is, use it and pin memory for faster CPU-to-GPU transfer
             x_batch = x_batch.to(self.device, non_blocking=True)
             y_batch = y_batch.to(self.device, non_blocking=True)
 
-            # Determine and set the learning rate for this iteration
-            lr = get_lr(i) if cfg.learning_rate.decay_lr else cfg.learning_rate.learning_rate
-
-            # Update learning rate in all parameter groups
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
+            # warmup phase: linear scaling of learning rate
+            if not cfg.learning_rate.decay_lr or i < warmup_iters:
+                warmup_factor = i / warmup_iters if i < warmup_iters else 1
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = warmup_factor * cfg.learning_rate.learning_rate
 
             self.model.require_backward_grad_sync = (i+1) % cfg.data.gradient_accumulation_steps == 0 if cfg.ddp.ddp else True
 
@@ -174,44 +171,66 @@ class GramTrainer(BaseGram):
                 logits, loss = self.model(x_batch, y_batch)
                 loss = loss / cfg.data.gradient_accumulation_steps
 
-            # Perform a backward pass through the model to compute the gradients
-            self.scaler.scale(loss).backward()
+            if isinstance(self.scaler, torch.cuda.amp.GradScaler):
+                # If the scaler is a GradScaler, we can use it for mixed-precision training
+                loss_scaled = self.scaler.scale(loss)
+                loss_scaled.backward()
+            else:
+                # If the scaler is a nullcontext, we're not doing mixed-precision training
+                loss.backward()
+
             total_loss += loss.item()
 
             if ((i+1) % cfg.data.gradient_accumulation_steps == 0) or (i + 1 == len(self.train_dataloader)):
                 # Clip the gradients if a threshold is specified in the configuration
                 if cfg.optimizer.grad_clip != 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
+                    if isinstance(self.scaler, torch.cuda.amp.GradScaler):
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.optimizer.grad_clip)
 
                 # Update the model parameters
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                if isinstance(self.scaler, torch.cuda.amp.GradScaler):
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Update the model parameters without scaling if CUDA is not available
+                    self.optimizer.step()
+
                 self.optimizer.zero_grad(set_to_none=True)
 
-            # Check if it's time to perform validation
-            if ((i+1) % val_interval == 0) or (i + 1 == len(self.train_dataloader)):
-                val_loss = self._eval()
-                print(f"train loss: {total_loss / val_interval:.4f}, val loss: {val_loss:.4f}")
+            # Update learning rate using the scheduler after optimizer.step()
+            if cfg.learning_rate.decay_lr and i >= warmup_iters:
+                scheduler.step()
 
+            # Check if it's time to perform validation
+            if time.time() - eval_time >= cfg.io_metrics.save_interval * 60:  
+                start_eval_time = time.time()
+                val_loss = self._eval()
+                end_eval_time = time.time()
+                eval_duration = (end_eval_time - start_eval_time) / 60  
+
+                print(f"train loss: {total_loss / (i+1):.4f},\
+                    val loss: {val_loss:.4f},\
+                    eval time: {eval_duration:.4f}m,\
+                    batch {i+1} of {len(self.train_dataloader)}")
+                            
                 if cfg.io_metrics.log:
+                    lr = self.optimizer.param_groups[0]['lr']
                     log_data = {
-                        'train_loss': total_loss / val_interval,
+                        'train_loss': total_loss / (i+1),
                         'val_loss': val_loss,
-                        'lr': lr
+                        'eval_time': eval_duration,
+                        'lr': lr,
                     }
 
                     log_to_csv('training_log.csv', log_data)
 
                 if val_loss < best_val_loss or cfg.io_metrics.always_save_checkpoint:
                     best_val_loss = val_loss
-                    self._save_model(i, best_val_loss)   
+                    if not cfg.ddp.ddp or self.device == 0:
+                        self._save_model(i, best_val_loss)  
 
-                # update val interval only if it's not the last iteration
-                if (i + 1) != len(self.train_dataloader):
-                    val_interval = val_interval * 2
-
-                self.model.train()
+                eval_time = time.time() 
 
         # Compute the average loss over all batches
         train_loss = total_loss / len(self.train_dataloader)
@@ -257,6 +276,9 @@ class GramTrainer(BaseGram):
 
         # Compute the average loss over all batches
         avg_val_loss = total_loss / len(self.val_dataloader)
+
+        # back to training mode
+        self.model.train()
 
         # Return the average loss for the validation data
         return avg_val_loss
@@ -312,7 +334,5 @@ class GramTrainer(BaseGram):
                     mfu = raw_model.estimate_mfu(cfg.data.batch_size * cfg.data.gradient_accumulation_steps, dt)
                     running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
                 print(f"iter {iter_num}: loss {train_loss:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
-
-        
-
-
+            
+            self.iter_num = 0

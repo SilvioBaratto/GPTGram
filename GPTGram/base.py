@@ -58,11 +58,9 @@ class BaseGram(metaclass=ABCMeta):
     def __init__(self, **kwargs):
         
         self._init_config(**kwargs)
-        self._init_file_paths()
         self.init_model()
         self.init_optimizer()
         self._init_scaler()
-
         self._init_ctx()
         self._update_gradient_accumulation_steps()
 
@@ -145,8 +143,6 @@ class BaseGram(metaclass=ABCMeta):
         # Determine the library directory based on the "cfg.io_metrics.folder" attribute
         if cfg.io_metrics.out_dir is None:
             self.lib_dir = os.path.dirname(os.path.realpath(__file__)) # Use the current directory
-        else:
-            self.lib_dir = cfg.io_metrics.out_dir
 
         # Get the file path configurations from the '_log_build_file_path' method
         file_path_configs = self._log_build_file_path()
@@ -166,32 +162,37 @@ class BaseGram(metaclass=ABCMeta):
 
         Returns:
             model (GPT): The initialized model.
-        """
-        # Initialize a new instance of the model
-        model = GPT()
-        
+        """        
         # Device setup
         self.device = int(os.environ["LOCAL_RANK"]) if cfg.ddp.ddp \
-                    else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    else torch.device('cuda' if cfg.system.use_cuda else 'cpu')
 
         # If specified in the configuration, resume training from a checkpoint
         if cfg.io_metrics.init_from == 'resume':
-            if not cfg.ddp.ddp or os.environ.get('RANK', '0') == '0':
-                print(f"Resuming from checkpoint {self.file_path}")
-            self._load_model(model)
+            if not cfg.ddp.ddp or self.device == 0:
+                print(f"Resuming from checkpoint {cfg.io_metrics.out_dir}")
+            model = self._load_model()
 
         # Alternatively, If specified in the configuration, initialize from a pretrained model with
         # pretrained GPT-2 weights
-        elif cfg.io_metrics.init_from.startswith(cfg.io_metrics.init_from):
+        elif cfg.io_metrics.init_from.startswith('gpt2'):
             if not cfg.ddp.ddp or os.environ.get('RANK', '0') == '0':
                 print(f"Initializing from OpenAI GPT-2 weights {cfg.io_metrics.init_from}")
             model = self.from_pretrained(cfg.io_metrics.init_from)
+
+        else:
+            # If neither of the above options were specified, initialize a new model
+            if not cfg.ddp.ddp or self.device == 0:
+                print("Initializing new model")
+                self._init_file_paths()
+
+            model = GPT()
    
         # Move the model to the appropriate device
         self.model = model.to(self.device)
 
         # report number of parameters
-        if not cfg.ddp.ddp or os.environ.get('RANK', '0') == '0':
+        if not cfg.ddp.ddp or self.device == 0:
             print("number of parameters: %.2fM" % (self.model.get_num_params()/1e6,))
 
         self.model_args = dict(n_layer = cfg.gpt.n_layer,
@@ -280,8 +281,10 @@ class BaseGram(metaclass=ABCMeta):
         Returns:
             None
         """
-        # Create the necessary directory structure for the file path
-        os.makedirs(os.path.dirname(self.file_path), mode=0o755, exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(self.file_path), mode=0o755, exist_ok=True)
+        except FileExistsError:
+            pass
 
         # The following section is your provided code incorporated into this function:
         raw_model = self.model.module if cfg.ddp.ddp else self.model # unwrap DDP container if needed
@@ -295,13 +298,11 @@ class BaseGram(metaclass=ABCMeta):
             'config': self.config_to_dict()
         }
 
-        print(f"saving checkpoint to {self.lib_dir}")
+        print(f"saving checkpoint")
         torch.save(state, self.file_path)
 
 
-    def _load_model(self,
-                    model, 
-                    optimizer=None) -> None:
+    def _load_model(self, optimizer=None) -> None:
         """
         Load a previously saved model and optimizer state from a checkpoint file.
 
@@ -317,12 +318,30 @@ class BaseGram(metaclass=ABCMeta):
         """
         
         # Check if the file path exists
-        if not os.path.exists(self.file_path):
-            raise FileNotFoundError(f"File path '{self.file_path}' does not exist")
+        if not os.path.exists(cfg.io_metrics.out_dir):
+            raise FileNotFoundError(f"File path '{cfg.io_metrics.out_dir}' does not exist")
         
         # Load the state from the file path
-        checkpoint = torch.load(self.file_path, 
-                                map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        checkpoint = torch.load(cfg.io_metrics.out_dir, 
+                                map_location=torch.device('cuda' if cfg.system.use_cuda else 'cpu'))
+        
+        # Get the base name of the file (excluding the directory path)
+        filename = os.path.basename(cfg.io_metrics.out_dir)
+
+        # Remove the '.state' and split by underscore
+        params = filename.replace('.state', '').split('_')
+
+        # Assign parameters to the configuration object
+        cfg.io_metrics.name = str(params[0])
+        cfg.gpt.block_size = int(params[1])
+        cfg.gpt.vocab_size = int(params[2])  # This is typically fixed for GPT models
+        cfg.gpt.n_layer = int(params[3])
+        cfg.gpt.n_head = int(params[4])
+        cfg.gpt.n_embd = int(params[5])
+        cfg.gpt.dropout = float(params[6])
+        cfg.gpt.bias = params[7] == 'True'  # Convert from string to boolean
+
+        self.file_path = cfg.io_metrics.out_dir
         
         # Update the 'model_args', 'iter_num', 'best_val_loss', and 'config' attributes
         self.model_args = checkpoint['model_args']
@@ -338,13 +357,17 @@ class BaseGram(metaclass=ABCMeta):
         for k, v in list(state_dict.items()):
             if k.startswith(unwanted_prefix):
                 state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-
-        # Load the model state into the model
+        
+        # Initialize and load the model state
+        model = GPT()
         model.load_state_dict(state_dict)
 
-        # Load optimizer state if optimizer is provided
+        # If provided, load optimizer state
         if optimizer is not None:
             optimizer.load_state_dict(checkpoint['optimizer'])
+
+        return model
+
 
     def config_to_dict(self) -> dict:
         """
@@ -363,8 +386,7 @@ class BaseGram(metaclass=ABCMeta):
         
         return subconfigs       
 
-    @classmethod
-    def from_pretrained(cls, model_type, override_args=None):
+    def from_pretrained(self, model_type, override_args=None):
         """
         Creates a GPT model from a pretrained model.
 
@@ -411,6 +433,11 @@ class BaseGram(metaclass=ABCMeta):
         cfg.gpt.n_head = config_args['n_head']
         cfg.gpt.n_embd = config_args['n_embd']
 
+        # set name 
+        cfg.io_metrics.name = model_type
+
+        self._init_file_paths()
+
         # Override the dropout rate, if desired
         if 'dropout' in override_args:
             cfg.gpt.dropout = override_args['dropout']
@@ -454,43 +481,6 @@ class BaseGram(metaclass=ABCMeta):
 
         return model
     
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """
-        Estimates the model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
-
-        This method first calculates the number of flops per iteration using the model's configuration
-        parameters and the given fwdbwd_per_iter. It then computes the MFU by comparing the estimated 
-        flops with the peak flops of an A100 GPU in bfloat16 mode.
-
-        Args:
-            fwdbwd_per_iter (float): The number of forward and backward passes per iteration.
-            dt (float): The time duration of the iteration in seconds.
-
-        Returns:
-            float: The estimated model flops utilization (MFU).
-        """
-        # Number of parameters in the model
-        N = self.model.get_num_params()
-
-        # Unpack key parameters from the configuration
-        L, H, Q, T = cfg.gpt.n_layer, cfg.gpt.n_head, cfg.gpt.n_embd // cfg.gpt.n_head, cfg.gpt.block_size
-
-        # Estimate the number of floating point operations (flops) per token and per iteration
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-
-        # Compute flops achieved per second
-        flops_achieved = flops_per_iter * (1.0 / dt)
-
-        # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        flops_promised = 312e12
-
-        # Compute model flops utilization (MFU) as the ratio of achieved flops to peak flops
-        mfu = flops_achieved / flops_promised
-
-        return mfu
-
     def _log_build_file_path(self) -> dict:
         """
         Builds the file path for saving the model state.
@@ -500,7 +490,7 @@ class BaseGram(metaclass=ABCMeta):
         """
 
         file_path_configs = {
-            "file_format": cfg.io_metrics.init_from + '_{}_{}_{}_{}_{}_{}_{}.state',
+            "file_format": cfg.io_metrics.name + '_{}_{}_{}_{}_{}_{}_{}.state',
             "args": (cfg.gpt.block_size, cfg.gpt.vocab_size, cfg.gpt.n_layer,
                         cfg.gpt.n_head, cfg.gpt.n_embd, cfg.gpt.dropout, cfg.gpt.bias)
         }

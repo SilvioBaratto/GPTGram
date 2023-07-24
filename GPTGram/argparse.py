@@ -21,9 +21,6 @@ def arg_parser():
     parser = argparse.ArgumentParser(description='GPT Configuration')
 
     # GPT Config
-    parser.add_argument('--block_size', type=int, default=cfg.gpt.block_size, 
-                        help='The maximum length of a sequence for the GPT model. '
-                             'It determines the window size for context in Transformer architecture.')
     parser.add_argument('--vocab_size', type=int, default=cfg.gpt.vocab_size, 
                         help='The size of vocabulary, i.e., the number of unique tokens recognized by the model.')
     parser.add_argument('--n_layer', type=int, default=cfg.gpt.n_layer, 
@@ -52,16 +49,20 @@ def arg_parser():
                         help='Path to initialize model from a pre-trained checkpoint.')
     parser.add_argument('--log', action='store_true', default=cfg.io_metrics.log, 
                         help='If set, enables logging.')
-    parser.add_argument('--model', type=str, default=cfg.io_metrics.model, 
+    parser.add_argument('--name', type=str, default=cfg.io_metrics.name, 
                         help='Name of the model for saving and loading purposes.')
     parser.add_argument('--folder', type=str, default=cfg.io_metrics.folder, 
                         help='Name of the folder to save outputs and checkpoints.')
+    parser.add_argument('--dataset', type=str, default=cfg.io_metrics.dataset, 
+                        help='Name of the folder dataset to save load file .bin.')
 
     # Data Config
     parser.add_argument('--gradient_accumulation_steps', type=int, default=cfg.data.gradient_accumulation_steps, 
                         help='The number of steps for gradient accumulation. '
                              'Effectively increases the batch size while using the same amount of memory.')
     parser.add_argument('--batch_size', type=int, default=cfg.data.batch_size, 
+                        help='The number of examples in a batch for training.')
+    parser.add_argument('--block_size', type=int, default=cfg.gpt.block_size, 
                         help='The number of examples in a batch for training.')
 
     # Optimizer Config
@@ -79,12 +80,8 @@ def arg_parser():
     # Learning Rate Config
     parser.add_argument('--learning_rate', type=float, default=cfg.learning_rate.learning_rate, 
                         help='The initial learning rate for training.')
-    parser.add_argument('--decay_lr', action='store_true', default=cfg.learning_rate.decay_lr, 
+    parser.add_argument('--decay_lr', type=bool, default=cfg.learning_rate.decay_lr, 
                         help='If set, enables learning rate decay.')
-    parser.add_argument('--warmup_iters', type=int, default=cfg.learning_rate.warmup_iters, 
-                        help='The number of warmup iterations for the learning rate scheduler.')
-    parser.add_argument('--lr_decay_iters', type=int, default=cfg.learning_rate.lr_decay_iters, 
-                        help='The number of iterations over which the learning rate is decayed.')
     parser.add_argument('--min_lr', type=float, default=cfg.learning_rate.min_lr, 
                         help='The minimum learning rate during decay.')
 
@@ -101,6 +98,10 @@ def arg_parser():
                         help='If set, compiles the model graph for improved performance.')
     parser.add_argument('--num_workers', type=int, default=cfg.system.num_workers, 
                         help='The number of worker threads to use for data loading.')
+    parser.add_argument('--is_slurm', action='store_true', default=cfg.system.is_slurm, 
+                        help='If set, the script will check if it is running in a SLURM environment.')
+    parser.add_argument('--walltime', type=str, default=cfg.system.walltime,
+                        help='max walltime from the slurm enviroment')
 
     # Sampling Config
     parser.add_argument('--start', type=str, default=cfg.sampling.start, 
@@ -119,4 +120,5 @@ def arg_parser():
     args = parser.parse_args()
 
     return args
+
 

@@ -34,7 +34,8 @@ from GPTGram.sample import GramSampler
 from GPTGram.config import Config as cfg
 from GPTGram.argparse import arg_parser
 
-# Initialize an empty dictionary to hold the GramSampler objects for each chat.
+# Initialize a GramSampler object for the entire application.
+sampler = GramSampler(**vars(arg_parser()))
 samplers = {}
 
 async def auto_reply(client):
@@ -64,12 +65,15 @@ async def auto_reply(client):
 
         """
 
-        # Only auto-reply to incoming private chats.
-        if event.is_private and not event.out: 
+        # Only auto-reply to incoming chats.
+        if not event.out: 
+
+            # Get sender_id according to the type of chat (private or group)
+            sender_id = event.message.peer_id.user_id if event.is_private else event.message.from_id.user_id
 
             # Retrieve sender and bot info.
             me = await client.get_me()  # get the current user information
-            sender_entity = await client.get_entity(event.message.peer_id.user_id)  # get the entity of the sender
+            sender_entity = await client.get_entity(sender_id)  # get the entity of the sender
 
             # Extract the sender's name.
             sender_name = f"{sender_entity.first_name} {sender_entity.last_name or ''}".strip()
@@ -86,51 +90,39 @@ async def auto_reply(client):
                 os.makedirs(os.path.dirname(sender_file_path))
 
             # If there's no sampler for this conversation, create one.
-            if event.message.peer_id.user_id not in samplers:
+            if sender_id not in samplers:
                 # If the chat file doesn't exist, create it and write the first message.
                 if not os.path.isfile(sender_file_path):
                     with open(sender_file_path, "w", encoding="utf-8") as f:
                         f.write(f"{sender_name}: {event.message.text}\n")
 
-                # Create a new GramSampler for this chat.
-                samplers[event.message.peer_id.user_id] = GramSampler(file=sender_file_path, **vars(args))
-
                 # Mark this as the first message from this chat.
-                first_message_flags[event.message.peer_id.user_id] = True  
+                first_message_flags[sender_id] = True  
 
             # Get the GramSampler for this chat.
-            sampler = samplers[event.message.peer_id.user_id]
-
-            # Generate a reply using the sampler.
-            reply_text = sampler.generate(temperature=cfg.sampling.temperature,
-                                          top_k=cfg.sampling.top_k
-                                          )
+            reply_text = sampler.generate(file=sender_file_path,
+                                          temperature=cfg.sampling.temperature,
+                                          top_k=cfg.sampling.top_k)
             
             # Send the reply.
             await event.respond(reply_text)
 
             # Append the last received message and its automatic reply to the sender's chat file.
             with open(sender_file_path, "a", encoding="utf-8") as f:
-                # If this is not the first message, write the sender's message.
-                if not first_message_flags.get(event.message.peer_id.user_id, False):
-                    f.write(f"{sender_name}: {event.message.text}\n")
+                # Write the sender's message.
+                f.write(f"{sender_name}: {event.message.text}\n")
 
                 # Write the bot's reply.
                 f.write(f"{cfg.sampling.user}: {reply_text}\n")
 
             # Set the flag for first message to False.
-            first_message_flags[event.message.peer_id.user_id] = False
+            first_message_flags[sender_id] = False
 
     print(time.asctime(), '-', 'Auto-replying...')
     await client.run_until_disconnected()
     print(time.asctime(), '-', 'Stopped!')
 
-
-
 if __name__ == '__main__':
-    # Parse the command-line arguments.
-    args = arg_parser()
-
     # Load the environment variables from the .env file.
     load_dotenv()
 
@@ -147,6 +139,13 @@ if __name__ == '__main__':
     # Run the auto-reply coroutine.
     loop = asyncio.get_event_loop()
     loop.run_until_complete(auto_reply(client))
+
+    
+    
+    
+    
+    
+
 
     
     

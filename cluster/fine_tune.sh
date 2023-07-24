@@ -27,10 +27,6 @@ then
     exit 1
 fi
 
-# Ask the user for any extra flags for the torchrun command
-echo "Please enter any extra flags for the torchrun command (or press enter for none):"
-read torchrun_flags
-
 # Create a temporary job script
 jobscript=$(mktemp)
 
@@ -66,7 +62,7 @@ cd cluster/
 EOF
 
 # Resume training from an existing model
-echo "srun torchrun --standalone --nproc_per_node=${ngpus:-0} ../cmd/train.py $torchrun_flags --walltime=$time_needed" >> $jobscript
+echo "srun torchrun --standalone --nproc_per_node=${ngpus:-0} ../cmd/train.py --init_from=gpt2-large --batch_size=4 --block_size=1024 --learning_rate=3e-5 --gradient_accumulation=32 --decay_lr=False --walltime=$time_needed" >> $jobscript
 
 # Submit the job script
 sbatch $jobscript

@@ -23,12 +23,12 @@ class GPTConfig:
                      Default is True.
     """
 
-    block_size: int = 1024
     vocab_size: int = 50304
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
+    block_size: int = 1024
     bias: bool = True
 
 @dataclass
@@ -55,11 +55,14 @@ class IOMetricsConfig:
     eval_interval: int = 3
     log_interval: int = 1
     eval_only: bool = False
+    save_interval: int = 90
     always_save_checkpoint: bool = True
     init_from: str = 'scratch'
     log: bool = True
-    model: str = 'gpt2'
-    folder: str = '../dataset/'
+    name: str = 'gpt2'
+    folder: str = '../../out/'
+    dataset: str = '../dataset/'
+    file: str = None
 
 @dataclass
 class DataConfig:
@@ -75,7 +78,6 @@ class DataConfig:
 
     gradient_accumulation_steps: int = 5 * torch.cuda.device_count() if torch.cuda.is_available() else 5
     batch_size: int = 12
-    block_size: int = 1024
 
 @dataclass
 class OptimizerConfig:
@@ -113,8 +115,6 @@ class LearningRateConfig:
 
     learning_rate: float = 6e-4
     decay_lr: bool = True
-    warmup_iters: int = int(OptimizerConfig.max_iters * 0.1)
-    lr_decay_iters: int = int(OptimizerConfig.max_iters * 0.9)
     min_lr: float = 6e-5
 
 @dataclass
@@ -148,6 +148,8 @@ class SystemConfig:
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
     compile: bool = True
     num_workers: int = int(os.environ['SLURM_CPUS_PER_TASK']) if 'SLURM_CPUS_PER_TASK' in os.environ else 4
+    is_slurm: bool = os.getenv('SLURM_JOB_ID') is not None
+    walltime: str = '04:00:00' if is_slurm is not None else None 
 
 @dataclass
 class SamplingConfig:
@@ -165,9 +167,9 @@ class SamplingConfig:
     """
 
     start: str = "\n"
-    user: str = "silvio: "
+    user: str = "silvio"
     num_samples: int = 10
-    max_new_tokens: int = 500
+    max_new_tokens: int = 250
     temperature: float = 0.8
     top_k: int = 200
     seed: int = 1337

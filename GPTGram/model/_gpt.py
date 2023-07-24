@@ -7,6 +7,8 @@ import tiktoken
 from ._transformer import LayerNorm, Block
 from ..config import Config as cfg
 
+new_line = tiktoken.get_encoding("gpt2").encode("\n")[0]
+
 class GPT(nn.Module):
     """
     A class that represents the GPT model.
@@ -245,6 +247,43 @@ class GPT(nn.Module):
             if hasattr(block.attn, 'bias'):
                 # If it does, crop the attention bias to the new block size
                 block.attn.bias = block.attn.bias[:,:,:cfg.gpt.block_size,:cfg.gpt.block_size]
+    
+    def estimate_mfu(self, fwdbwd_per_iter, dt):
+        """
+        Estimates the model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
+
+        This method first calculates the number of flops per iteration using the model's configuration
+        parameters and the given fwdbwd_per_iter. It then computes the MFU by comparing the estimated 
+        flops with the peak flops of an A100 GPU in bfloat16 mode.
+
+        Args:
+            fwdbwd_per_iter (float): The number of forward and backward passes per iteration.
+            dt (float): The time duration of the iteration in seconds.
+
+        Returns:
+            float: The estimated model flops utilization (MFU).
+        """
+        # Number of parameters in the model
+        N = self.get_num_params()
+
+        # Unpack key parameters from the configuration
+        L, H, Q, T = cfg.gpt.n_layer, cfg.gpt.n_head, cfg.gpt.n_embd // cfg.gpt.n_head, cfg.gpt.block_size
+
+        # Estimate the number of floating point operations (flops) per token and per iteration
+        flops_per_token = 6 * N + 12 * L * H * Q * T
+        flops_per_fwdbwd = flops_per_token * T
+        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+
+        # Compute flops achieved per second
+        flops_achieved = flops_per_iter * (1.0 / dt)
+
+        # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        flops_promised = 312e12
+
+        # Compute model flops utilization (MFU) as the ratio of achieved flops to peak flops
+        mfu = flops_achieved / flops_promised
+
+        return mfu
 
     @torch.no_grad()
     def sample(self, idx, max_new_tokens, temperature=1.0, top_k=None):
@@ -267,8 +306,9 @@ class GPT(nn.Module):
         Returns:
             torch.LongTensor: The completed sequence of tokens.
         """
-        newline_token = tiktoken.get_encoding("gpt2").encode("\n")[0]
-
+        # Store the initial length of the input sequence
+        initial_len = idx.size(1)
+    
         for _ in range(max_new_tokens):
             # If the sequence context is growing too long, crop it to block size
             idx_cond = idx if idx.size(1) <= cfg.gpt.block_size else idx[:, -cfg.gpt.block_size:]
@@ -288,7 +328,33 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
             # If the last generated token is a newline, break the loop
-            if idx_next.item() == newline_token:
+            if idx_next.item() == new_line:
                 break
 
-        return idx
+        # Slice idx to include only the new tokens and not include the newline token
+        idx_new = idx[:, initial_len:-1]
+
+        return idx_new
+
+    @torch.no_grad()
+    def perplexity(self, idx, targets):
+        """
+        Calculates the perplexity of the model's predictions on a batch of sequences.
+
+        Args:
+            idx (torch.Tensor): The input sequences, of shape [batch_size, sequence_length].
+            targets (torch.Tensor): The target sequences, of the same shape as idx.
+
+        Returns:
+            float: The calculated perplexity.
+        """
+        # Forward pass
+        logits, _ = self.forward(idx, targets)
+
+        # Calculate the cross entropy loss
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        
+        # Perplexity is the exponential of the average loss over the sequence length
+        perplexity = torch.exp(loss).item()
+
+        return perplexity
